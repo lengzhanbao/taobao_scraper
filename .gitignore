@@ -1,0 +1,53 @@
+# Data, results, and runtime state
+/直播研究数据/
+/_outputs/
+/_archive/
+/_session_rollback_20260809/
+
+# Runtime logs and local dashboard state
+/_logs/*
+!/_logs/serve_status.py
+!/_logs/dashboard.html
+!/_logs/打开仪表盘.bat
+
+# Browser profiles and sync caches
+/.edge_9223/
+/.edge_9224/
+/.edge_9225/
+/.edge_9226/
+/.edge_9227/
+/.quark_data/
+/.quark_data_0/
+/.quark_data_1/
+/.quark_data_2/
+/.quark_data0/
+/.workbuddy/
+/.chrome_data/
+/.chromium_data/
+/.edge_data/
+/.edge_test/
+/.digital_check_*/
+/.digital_playwright_profile_test/
+/.edge_digital_check/
+
+# Vendored runtime
+/DouyinLiveRecorder_v4.0.7/
+
+# Generated Python
+__pycache__/
+*.py[cod]
+
+# Backups and scratch files
+*.bak
+*.bak0801
+*.bak0801_1605
+*.pre_slider.bak
+*.bugfix0801.bak
+*.1101.bak
+
+# Secrets and local credentials
+.env
+.env.*
+*.pem
+**/taobao_cookies.json
+**/taobao_cookies.txt

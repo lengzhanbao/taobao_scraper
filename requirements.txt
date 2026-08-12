@@ -1,0 +1,18 @@
+# 直播爬取项目依赖
+# 安装: pip install -r requirements.txt
+#
+# 核心爬虫（taobao_run_edge_1~5.py）
+DrissionPage>=4.0
+requests
+#
+# 解析（parse_taobao_data.py）—— 仅标准库，无额外依赖
+#
+# 特征提取（compute_features.py，分析阶段）
+numpy
+opencv-python
+mediapipe
+librosa
+scipy
+#
+# 辅助/统计脚本常用
+pandas
