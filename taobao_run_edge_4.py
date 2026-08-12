@@ -22,8 +22,7 @@ DELAY = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 if DELAY:
     print(f"⏳ 延迟 {DELAY}s 启动..."); time.sleep(DELAY)
 
-FFMPEG = r"E:\直播爬取\DouyinLiveRecorder_v4.0.7\ffmpeg\ffmpeg.exe"
-STUDY_ROOT = r"E:\直播爬取\直播研究数据"
+from config import STUDY_ROOT, FFMPEG
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", sys.argv[1])
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")

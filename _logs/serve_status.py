@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 import urllib.request
 
-ROOT = r"E:\直播爬取"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "_logs")
 STAGING = os.path.join(ROOT, "直播研究数据", "_staging")
 SESSIONS = os.path.join(ROOT, "直播研究数据", "sessions")

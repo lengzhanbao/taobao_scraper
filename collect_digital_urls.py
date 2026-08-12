@@ -6,7 +6,7 @@
 
 import os, sys, time, json, re, random
 
-STUDY_ROOT = r"E:\直播爬取\直播研究数据"
+from config import STUDY_ROOT
 OUTDIR = os.path.join(STUDY_ROOT, "_staging")
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", "live_urls.txt")
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")

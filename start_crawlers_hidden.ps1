@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-$py = 'C:\Users\SYH\AppData\Local\Programs\Python\Python311\python.exe'
+$py = $env:LIVE_PYTHON
+if (-not $py) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    $py = if ($cmd) { $cmd.Source } else { 'python' }
+}
 $workDir = $PSScriptRoot
 $logDir = Join-Path $workDir '_logs\hidden_launch'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null

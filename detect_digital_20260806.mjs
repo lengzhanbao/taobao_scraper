@@ -2,11 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require('C:/Users/SYH/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright-core');
+const playwrightCorePath = process.env.LIVE_PLAYWRIGHT_CORE_PATH;
+const { chromium } = playwrightCorePath
+  ? require(playwrightCorePath)
+  : require('playwright-core');
 
-const ROOT = 'E:/直播爬取';
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
 const STUDY_ROOT = path.join(ROOT, '直播研究数据');
 const COOKIE_JSON = path.join(STUDY_ROOT, '_config', 'taobao_cookies.json');
 const NOW = new Date();
@@ -16,7 +20,7 @@ const DATE_STAMP = [
   String(NOW.getDate()).padStart(2, '0'),
 ].join('');
 const TXT_PATH = path.join(ROOT, `数字人确认_${DATE_STAMP}.txt`);
-const EDGE_PATH = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
+const EDGE_PATH = process.env.LIVE_EDGE_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const PROFILE_DIR = path.join(ROOT, `.digital_check_playwright_${Date.now()}`);
 const LOG_DIR = path.join(ROOT, '_logs');
 const LOG_PATH = path.join(LOG_DIR, `detect_digital_${Date.now()}.log`);

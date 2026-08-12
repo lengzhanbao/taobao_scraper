@@ -9,8 +9,10 @@ import os
 import time
 
 
-STAGING = r"E:\直播爬取\直播研究数据\_staging"
-SESSIONS = r"E:\直播爬取\直播研究数据\sessions"
+from config import STUDY_ROOT
+
+STAGING = os.path.join(STUDY_ROOT, "_staging")
+SESSIONS = os.path.join(STUDY_ROOT, "sessions")
 MIN_SEC = 420
 
 

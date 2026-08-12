@@ -8,7 +8,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-STUDY_ROOT = r"E:\直播爬取\直播研究数据"
+from config import STUDY_ROOT
 SESSIONS = os.path.join(STUDY_ROOT, "sessions")
 os.makedirs(SESSIONS, exist_ok=True)
 

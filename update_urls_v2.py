@@ -2,9 +2,11 @@
 """更新 urls 状态（基于有 _final.json 的片段）。用法: python update_urls_v2.py [--apply]"""
 import os, sys
 
-config = r'E:/直播爬取/直播研究数据/_config'
-staging = r'E:/直播爬取/直播研究数据/_staging'
-sessions = r'E:/直播爬取/直播研究数据/sessions'
+from config import STUDY_ROOT
+
+config = os.path.join(STUDY_ROOT, "_config")
+staging = os.path.join(STUDY_ROOT, "_staging")
+sessions = os.path.join(STUDY_ROOT, "sessions")
 APPLY = '--apply' in sys.argv
 
 # sessions 已归档 liveId
