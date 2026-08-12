@@ -41,6 +41,11 @@
 # Generated Python
 __pycache__/
 *.py[cod]
+.venv/
+
+# Node
+node_modules/
+package-lock.json
 
 # Backups and scratch files
 *.bak
