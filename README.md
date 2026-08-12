@@ -24,6 +24,50 @@ taobao_scraper/
 └─ config.py                       # 路径配置
 ```
 
+## 每个文件夹是做什么的
+
+```text
+直播研究数据/
+├─ _config/          # 配置：urls_1~5.txt、taobao_cookies.json、session_register.csv
+├─ _staging/         # 录制暂存：5 个实例先写到这里，再解析进 sessions
+├─ sessions/         # 最终归档：每个直播间一个文件夹，包含 video/crawler/raw
+├─ sessions_old/     # 旧版 session 备份，不建议移动或删除
+└─ master/           # 分析总表输出，运行 build_master.py 后生成
+
+DouyinLiveRecorder_v4.0.7/
+└─ ffmpeg/           # ffmpeg.exe，录制视频用的运行依赖
+
+.edge_9223 ~ .edge_9227/   # 5 个爬虫实例各自的 Edge 登录 profile
+.edge_data/                # 共享登录态 seed，爬虫重建 profile 时会读取
+
+_logs/               # 运行日志、仪表盘文件
+_archive/            # 旧代码、备份、临时 profile 的归档区
+_outputs/            # 数字人确认等结果输出
+docs/                # 项目文档和参考资料
+.workbuddy/          # 本地记忆，不建议上传
+```
+
+### 必须建立的目录
+
+运行爬虫前，最少要建立这几个目录：
+
+```powershell
+New-Item -ItemType Directory -Force -Path "直播研究数据\_config"
+New-Item -ItemType Directory -Force -Path "直播研究数据\_staging"
+New-Item -ItemType Directory -Force -Path "直播研究数据\sessions"
+New-Item -ItemType Directory -Force -Path "DouyinLiveRecorder_v4.0.7\ffmpeg"
+```
+
+如果你还需要分析总表，可以额外建立：
+
+```powershell
+New-Item -ItemType Directory -Force -Path "直播研究数据\master"
+```
+
+`_logs`、`.edge_9223 ~ .edge_9227` 会在爬虫启动时自动创建。
+
+`sessions` 和 `sessions_old` 里是你的直播数据，不要删除、不要移动、不要上传到 Git。
+
 ## 从零开始
 
 如果你第一次使用这个项目，可以按下面的顺序准备。
