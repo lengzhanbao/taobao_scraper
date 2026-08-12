@@ -4,6 +4,7 @@
 /_archive/
 /_session_rollback_20260809/
 /docs/
+/数字人确认_*.txt
 
 # Runtime logs and local dashboard state
 /_logs/*
