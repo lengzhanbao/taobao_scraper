@@ -1,0 +1,68 @@
+# Data directories
+/直播研究数据/
+/_outputs/
+/_archive/
+/_logs/
+/数字人确认_*.txt
+
+# Browser profiles
+/.edge_9223/
+/.edge_9224/
+/.edge_9225/
+/.edge_9226/
+/.edge_9227/
+/.edge_data/
+/.chrome_data/
+/.chromium_data/
+
+# Runtime dependencies
+/DouyinLiveRecorder_v4.0.7/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Credentials and secrets
+.env
+.env.*
+*.pem
+**/taobao_cookies.json
+**/taobao_cookies.txt
+
+# Backups
+*.bak
+*.backup
+*.old
+
+# Feature extraction outputs
+*_features.json
+/features_output/
+
+# Temporary files
+*.tmp
+*.temp
+*.log

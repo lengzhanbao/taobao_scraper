@@ -1,0 +1,54 @@
+# Taobao Live Scraper Configuration
+
+## Environment Variables (Optional)
+
+You can customize paths using environment variables:
+
+### Windows (PowerShell)
+```powershell
+$env:LIVE_STUDY_ROOT = "D:\MyData\taobao_live_data"
+$env:LIVE_FFMPEG = "D:\Tools\ffmpeg\bin\ffmpeg.exe"
+$env:LIVE_PYTHON = "python3"
+```
+
+### Linux/Mac
+```bash
+export LIVE_STUDY_ROOT="/path/to/data"
+export LIVE_FFMPEG="/usr/bin/ffmpeg"
+export LIVE_PYTHON="python3"
+```
+
+## Available Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIVE_STUDY_ROOT` | `./直播研究数据` | Data root directory |
+| `LIVE_FFMPEG` | `./DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe` | FFmpeg executable |
+| `LIVE_PYTHON` | `python` | Python executable |
+| `LIVE_EDGE_PATH` | Windows default Edge path | Edge browser path |
+| `LIVE_PLAYWRIGHT_CORE_PATH` | None | Playwright core path for detection |
+
+## Directory Structure
+
+After setup, your project will have:
+
+```
+taobao-live-scraper/
+├── 直播研究数据/           # Data directory (not in git)
+│   ├── _config/           # Configuration files
+│   │   ├── urls_1.txt     # URLs for crawler 1
+│   │   ├── urls_2.txt     # URLs for crawler 2
+│   │   ├── urls_3.txt     # URLs for crawler 3
+│   │   ├── urls_4.txt     # URLs for crawler 4
+│   │   ├── urls_5.txt     # URLs for crawler 5
+│   │   └── taobao_cookies.json  # Login cookies
+│   ├── _staging/          # Temporary recording data
+│   └── sessions/          # Archived results
+│       └── <店铺>_<liveId>/
+│           ├── video/     # Recorded videos
+│           ├── crawler/   # Extracted data (CSV)
+│           └── raw/       # Raw JSON responses
+└── DouyinLiveRecorder_v4.0.7/  # FFmpeg (not in git)
+    └── ffmpeg/
+        └── ffmpeg.exe
+```

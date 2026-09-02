@@ -1,0 +1,20 @@
+{
+  "example": "This is a template for Taobao cookies",
+  "instructions": "Replace this content with actual cookies exported from browser",
+  "steps": [
+    "1. Login to taobao.com in your browser",
+    "2. Export cookies using browser developer tools or extensions",
+    "3. Save cookies as JSON array in this format",
+    "4. Copy to 直播研究数据/_config/taobao_cookies.json"
+  ],
+  "format": [
+    {
+      "name": "cookie_name",
+      "value": "cookie_value",
+      "domain": ".taobao.com",
+      "path": "/",
+      "httpOnly": true,
+      "secure": true
+    }
+  ]
+}

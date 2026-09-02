@@ -1,0 +1,8 @@
+# URL Configuration Template
+# Format: https://tbzb.taobao.com/live?liveId=XXXXX,店铺名称,已录制0/3
+
+# Example:
+# https://tbzb.taobao.com/live?liveId=123456789,示例店铺,已录制0/3
+
+# Add your live room URLs below (one per line):
+
