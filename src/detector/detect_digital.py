@@ -23,13 +23,17 @@ except Exception:
     ChromiumOptions = None
 
 
-ROOT = Path(__file__).resolve().parent
-STUDY_ROOT = ROOT / "直播研究数据"
-COOKIE_JSON = STUDY_ROOT / "_config" / "taobao_cookies.json"
-TXT_PATH = ROOT / "数字人确认_20260806.txt"
-EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from src.utils.config import STUDY_ROOT as CFG_STUDY_ROOT, EDGE_PATH as CFG_EDGE_PATH
 
-ID_LIST = [
+ROOT = Path(__file__).resolve().parent.parent.parent
+STUDY_ROOT = Path(os.environ.get("LIVE_STUDY_ROOT", str(CFG_STUDY_ROOT)))
+COOKIE_JSON = STUDY_ROOT / "_config" / "taobao_cookies.json"
+DEFAULT_TXT = STUDY_ROOT / "sessions" / "数字人确认.txt"
+EDGE_PATH = CFG_EDGE_PATH
+
+DEFAULT_IDS = [
     "4185708607630442",
     "2159201216030444",
     "3802945795113668",
@@ -51,6 +55,8 @@ ID_LIST = [
     "3203763468795195",
     "2779840023470123",
 ]
+# 兼容旧引用
+ID_LIST = DEFAULT_IDS
 
 
 def log(msg):
@@ -245,17 +251,33 @@ def check_one(page, live_id):
     return result
 
 
-def main():
+def main(argv=None):
+    """用法: python detect_digital.py [liveId] [--ids a,b] [--ids-file x.txt] [--out out.txt]"""
     if ChromiumPage is None or ChromiumOptions is None:
         log("DrissionPage not installed")
         sys.exit(1)
 
-    only = None
-    if len(sys.argv) > 1:
-        only = sys.argv[1]
-    ids = [only] if only else ID_LIST
+    import argparse
+    ap = argparse.ArgumentParser(description="Detect digital-human live rooms")
+    ap.add_argument("live_id", nargs="?", default=None, help="single liveId to check")
+    ap.add_argument("--ids", default="", help="comma-separated liveIds")
+    ap.add_argument("--ids-file", default="", help="file with one liveId per line")
+    ap.add_argument("--out", default=str(DEFAULT_TXT), help="output txt path")
+    args = ap.parse_args(argv)
 
-    TXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    ids = []
+    if args.live_id:
+        ids = [args.live_id]
+    elif args.ids:
+        ids = [s.strip() for s in args.ids.split(",") if s.strip()]
+    elif args.ids_file:
+        ids = [l.strip() for l in open(args.ids_file, encoding="utf-8")
+               if l.strip() and not l.startswith("#")]
+    else:
+        ids = list(DEFAULT_IDS)
+    txt_path = Path(args.out)
+
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
     profile_dir = ROOT / f".digital_check_profile_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -298,13 +320,13 @@ def main():
             for live_id in digital_ids
         ]
         if digital_lines:
-            with open(TXT_PATH, "w", encoding="utf-8") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(digital_lines) + "\n")
-            log(f"txt saved: {TXT_PATH}")
+            log(f"txt saved: {txt_path}")
         else:
-            with open(TXT_PATH, "w", encoding="utf-8") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write("未确认到数字人直播间\n")
-            log(f"txt saved (no digital rooms): {TXT_PATH}")
+            log(f"txt saved (no digital rooms): {txt_path}")
     except Exception:
         traceback.print_exc()
     finally:

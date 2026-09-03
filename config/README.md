@@ -27,6 +27,12 @@ export LIVE_PYTHON="python3"
 | `LIVE_PYTHON` | `python` | Python executable |
 | `LIVE_EDGE_PATH` | Windows default Edge path | Edge browser path |
 | `LIVE_PLAYWRIGHT_CORE_PATH` | None | Playwright core path for detection |
+| `LIVE_MAX_MIN` | `20` | Minutes recorded per segment |
+| `LIVE_MAX_ROUND` | `3` | Default segments per room (urls file can override) |
+| `LIVE_COOLDOWN_SEC` | `7200` | Cooldown between two recordings of the same room |
+| `LIVE_PRODUCT_MIN_SEC` | `0` | Product switch handling (0 = record only) |
+| `LIVE_MAX_COLLECTED` | `800` | Max intercepted responses kept in memory |
+| `LIVE_USER_AGENT` | Chrome 126 UA | Browser user agent |
 
 ## Directory Structure
 

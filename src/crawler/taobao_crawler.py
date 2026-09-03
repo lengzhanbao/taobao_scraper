@@ -24,16 +24,17 @@ if DELAY:
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from src.utils.config import STUDY_ROOT, FFMPEG
+from src.utils.config import (
+    STUDY_ROOT, FFMPEG, EDGE_PATH,
+    MAX_MIN, MAX_ROUND, COOLDOWN_SEC, PRODUCT_MIN_SEC,
+    MAX_COLLECTED, SEG_NAMES, USER_AGENT,
+)
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", sys.argv[1])
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
 OUTDIR = os.path.join(STUDY_ROOT, "_staging", f"browser_{PORT}")
-MAX_MIN = 20
-MAX_ROUND = 3
-PRODUCT_MIN_SEC = 0  # 0=商品切换只记录不早停
 COOKIE_TXT = os.path.join(STUDY_ROOT, "_config", f"taobao_cookies_{PORT}.txt")
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+UA = USER_AGENT
 
 os.makedirs(OUTDIR, exist_ok=True)
 
@@ -76,9 +77,6 @@ def clean_staging():
                     log("[clean] remove <7min seg: " + seg)
 
 state = {"collected": [], "stream_url": {"url": None}}
-MAX_COLLECTED = int(os.environ.get("LIVE_MAX_COLLECTED", "800"))
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-SEG_NAMES = ["第一段", "第二段", "第三段"]
 
 
 # 控制台编码兜底：输出重定向到文件时 Python 会退回 GBK，emoji 日志会崩
@@ -610,7 +608,10 @@ co.set_argument("--no-default-browser-check")
 co.set_argument("--disable-features=TranslateUI,msWelcomePage,msEdgeSync")
 co.set_argument("--disable-background-networking")
 co.set_argument("--disable-component-update")
-co.set_browser_path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+if os.path.exists(EDGE_PATH):
+    co.set_browser_path(EDGE_PATH)
+else:
+    log(f"  ⚠️ Edge 未找到({EDGE_PATH})，使用默认浏览器")
 co.set_local_port(PORT)
 co.set_user_data_path(user_data)
 log(f"Edge (端口 {PORT})")
@@ -697,7 +698,7 @@ while True:
         if count >= total:
             continue
         last = last_record.get(lid, 0)
-        if now - last < 120 * 60:
+        if now - last < COOLDOWN_SEC:
             continue
         if count > 0:
             hot.append((url, lid, count, total))
@@ -713,7 +714,7 @@ while True:
         wait = 60
         times = [last_record.get(lid, 0) for _, lid, c, t in url_pool if c < t]
         if times:
-            earliest = min(times) + 120 * 60 - now
+            earliest = min(times) + COOLDOWN_SEC - now
             if earliest > 0:
                 wait = min(earliest, 60)
         # 检查是否都满了

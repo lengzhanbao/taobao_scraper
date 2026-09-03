@@ -8,7 +8,7 @@ import os, sys, time, json, re, random
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from src.utils.config import STUDY_ROOT
+from src.utils.config import STUDY_ROOT, EDGE_PATH, USER_AGENT
 OUTDIR = os.path.join(STUDY_ROOT, "_staging")
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", "live_urls.txt")
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
@@ -23,9 +23,13 @@ MIN_DELAY = 60                 # 每次检查间隔最少1分钟
 MAX_DELAY = 120                # 最多2分钟
 EXISTING_COUNT = 34             # 已有34个，需新收集166个
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
-EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+UA = USER_AGENT
 os.makedirs(OUTDIR, exist_ok=True)
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 # ---- 清理上次异常退出遗留的浏览器/ffmpeg 进程 ----
 import subprocess as _sp
@@ -39,9 +43,6 @@ try:
 except Exception: pass
 
 from DrissionPage import ChromiumPage, ChromiumOptions
-
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 co = ChromiumOptions()
 co.headless(False)

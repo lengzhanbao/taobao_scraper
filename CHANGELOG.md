@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-09-03
+
+### Changed
+- 配置集中化：录制时长/轮次/冷却/内存上限/UA 全部进 `src/utils/config.py`，支持 `LIVE_*` 环境变量覆盖
+- 爬虫/收集器/检测器统一从 config 读取 Edge 路径与 UA，不再硬编码
+- `detect_digital.py` 参数化：支持 `liveId` / `--ids` / `--ids-file` / `--out`，默认输出改到 `sessions/数字人确认.txt`
+
+### Fixed
+- 修复 `collect_digital.py` 的 `log` 在使用之后才定义的顺序问题
+- 修复 `detect_digital.py` 默认数据目录无视 `LIVE_STUDY_ROOT` 的问题
+
+### Added
+- 新增 `tests/test_core.py`（7 用例：JSONP 解析、deep_find、数字人响应解析、配置默认值），CI 跑 `pytest`
+
 ## [2.0.1] - 2026-09-03
 
 ### Fixed

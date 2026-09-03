@@ -15,6 +15,14 @@ def _get_env_path(env_name, default_path):
     return os.environ.get(env_name, default_path)
 
 
+def _get_env_int(env_name, default):
+    """Get int from environment variable or use default"""
+    try:
+        return int(os.environ.get(env_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
 # Data root directory
 STUDY_ROOT = _get_env_path(
     "LIVE_STUDY_ROOT",
@@ -38,3 +46,18 @@ EDGE_PATH = _get_env_path(
 
 # Playwright core path for digital detection
 PLAYWRIGHT_CORE_PATH = os.environ.get("LIVE_PLAYWRIGHT_CORE_PATH", None)
+
+# Crawler tuning (override via environment variables)
+MAX_MIN = _get_env_int("LIVE_MAX_MIN", 20)              # minutes recorded per segment
+MAX_ROUND = _get_env_int("LIVE_MAX_ROUND", 3)           # segments per room (urls_4 uses 4 in file)
+COOLDOWN_SEC = _get_env_int("LIVE_COOLDOWN_SEC", 120 * 60)
+PRODUCT_MIN_SEC = _get_env_int("LIVE_PRODUCT_MIN_SEC", 0)
+MAX_COLLECTED = _get_env_int("LIVE_MAX_COLLECTED", 800)
+SEG_NAMES = ["第一段", "第二段", "第三段"]
+
+# Browser user agent
+USER_AGENT = os.environ.get(
+    "LIVE_USER_AGENT",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+)
