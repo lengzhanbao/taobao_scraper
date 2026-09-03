@@ -2,7 +2,9 @@
 """更新 urls 状态（基于有 _final.json 的片段）。用法: python update_urls_v2.py [--apply]"""
 import os, sys
 
-from config import STUDY_ROOT
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from src.utils.config import STUDY_ROOT
 
 config = os.path.join(STUDY_ROOT, "_config")
 staging = os.path.join(STUDY_ROOT, "_staging")

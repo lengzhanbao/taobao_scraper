@@ -1,374 +1,594 @@
-# 淘宝直播爬取
+# Taobao Live Scraper / 淘宝直播爬虫
 
-这个仓库是一套淘宝直播数字人直播间采集工具。它可以帮你：
+[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/lengzhanbao/taobao_scraper.svg)](https://github.com/lengzhanbao/taobao_scraper/stargazers)
 
-- 通过 5 个浏览器实例录制淘宝直播间的视频。
-- 抓取直播间弹幕、商品信息和直播摘要。
-- 检测哪些直播间是数字人直播。
-- 把录制结果整理成 `sessions` 目录下的研究数据。
+[English](#english) | [中文](#chinese)
 
-仓库里只保存代码，不包含直播数据、结果、Cookie、浏览器登录态和 `sessions`。这些内容都需要在你自己的电脑上准备。
+---
 
-## 这个项目的基本结构
+<a name="chinese"></a>
 
-```text
-taobao_scraper/
-├─ taobao_run_edge_1.py ~ 5.py    # 5 个爬虫实例
-├─ parse_taobao_data.py            # 解析并归档录制数据
-├─ update_urls_v2.py               # 更新 urls 录制状态
-├─ collect_digital_urls.py         # 收集数字人直播间
-├─ detect_digital_20260806.py/mjs  # 检测数字人直播间
-├─ finalize_7min_segments.py       # 补齐 7 分钟段的 final JSON
-├─ start_crawlers_hidden.ps1/vbs   # 隐藏启动 5 个爬虫实例
-├─ _logs/serve_status.py           # 本地仪表盘服务
-└─ config.py                       # 路径配置
-```
+## 📖 简介
 
-## 每个文件夹是做什么的
+**Taobao Live Scraper** 是一个专业的淘宝直播数据采集工具，专注于数字人直播间的监控、录制和分析。
 
-```text
-直播研究数据/
-├─ _config/          # 配置：urls_1~5.txt、taobao_cookies.json、session_register.csv
-├─ _staging/         # 录制暂存：5 个实例先写到这里，再解析进 sessions
-├─ sessions/         # 最终归档：每个直播间一个文件夹，包含 video/crawler/raw
-├─ sessions_old/     # 旧版 session 备份，不建议移动或删除
-└─ master/           # 分析总表输出，运行 build_master.py 后生成
+### 核心功能
 
-DouyinLiveRecorder_v4.0.7/
-└─ ffmpeg/           # ffmpeg.exe，录制视频用的运行依赖
+✅ **多实例并行录制** - 5个独立浏览器实例，同时监控不同直播间  
+✅ **智能数字人检测** - 自动识别数字人主播直播间  
+✅ **完整数据采集** - 视频录制 + 弹幕抓取 + 商品信息 + 直播数据  
+✅ **自动化归档** - 录制完成后自动解析并整理到结构化目录  
+✅ **防封禁设计** - 随机延迟、冷却机制、人性化操作模拟  
 
-.edge_9223 ~ .edge_9227/   # 5 个爬虫实例各自的 Edge 登录 profile
-.edge_data/                # 共享登录态 seed，爬虫重建 profile 时会读取
+### 适用场景
 
-_logs/               # 运行日志、仪表盘文件
-_archive/            # 旧代码、备份、临时 profile 的归档区
-_outputs/            # 数字人确认等结果输出
-docs/                # 项目文档和参考资料
-.workbuddy/          # 本地记忆，不建议上传
-```
+- 📊 电商直播数据研究
+- 🤖 数字人直播行为分析
+- 📈 直播带货效果监测
+- 💼 竞品直播策略分析
+- 🎓 学术研究数据采集
 
-### 必须建立的目录
+---
 
-运行爬虫前，最少要建立这几个目录：
+## 🚀 快速开始
 
-```powershell
-New-Item -ItemType Directory -Force -Path "直播研究数据\_config"
-New-Item -ItemType Directory -Force -Path "直播研究数据\_staging"
-New-Item -ItemType Directory -Force -Path "直播研究数据\sessions"
-New-Item -ItemType Directory -Force -Path "DouyinLiveRecorder_v4.0.7\ffmpeg"
-```
+### 系统要求
 
-如果你还需要分析总表，可以额外建立：
+- **操作系统**: Windows 10/11 (推荐), Linux, macOS
+- **Python**: 3.8 或更高版本
+- **浏览器**: Microsoft Edge (Windows) 或 Chrome/Chromium
+- **FFmpeg**: 用于视频录制
+- **硬盘空间**: 建议至少 50GB (用于视频存储)
 
-```powershell
-New-Item -ItemType Directory -Force -Path "直播研究数据\master"
-```
+### 安装步骤
 
-`_logs`、`.edge_9223 ~ .edge_9227` 会在爬虫启动时自动创建。
+#### 1. 克隆项目
 
-`sessions` 和 `sessions_old` 里是你的直播数据，不要删除、不要移动、不要上传到 Git。
-
-## 从零开始
-
-如果你第一次使用这个项目，可以按下面的顺序准备。
-
-### 第 1 步：下载项目
-
-```powershell
+```bash
 git clone https://github.com/lengzhanbao/taobao_scraper.git
 cd taobao_scraper
 ```
 
-### 第 2 步：安装 Python
+#### 2. 安装Python依赖
 
-推荐使用 Python 3.11 或更高版本。
-
-先确认 Python 已经安装：
-
-```powershell
-python --version
-```
-
-### 第 3 步：安装 Python 依赖
-
-推荐使用虚拟环境，这样不会影响系统里的其他 Python 环境。
-
-```powershell
+```bash
+# 推荐使用虚拟环境
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/Mac
+
+# 安装依赖
 pip install -r requirements.txt
 ```
 
-如果你不想使用虚拟环境，也可以直接安装：
+#### 3. 准备FFmpeg
 
-```powershell
-pip install -r requirements.txt
+**Windows:**
+- 下载 FFmpeg: https://ffmpeg.org/download.html
+- 解压到 `DouyinLiveRecorder_v4.0.7/ffmpeg/`
+- 确保 `ffmpeg.exe` 在该目录下
+
+**Linux/Mac:**
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# 设置环境变量
+export LIVE_FFMPEG=$(which ffmpeg)
 ```
 
-### 第 4 步：安装 Node.js 和 playwright-core
+#### 4. 创建数据目录
 
-数字人检测脚本 `detect_digital_20260806.mjs` 需要 Node.js 和 `playwright-core`。
-
-```powershell
-node --version
-npm install playwright-core
-```
-
-如果你已经有自己的 `playwright-core`，可以不执行 `npm install`，改为设置路径：
-
-```powershell
-$env:LIVE_PLAYWRIGHT_CORE_PATH = "你的 playwright-core 安装路径"
-```
-
-### 第 5 步：创建运行目录
-
-项目运行时需要以下本地目录：
-
-```text
-直播研究数据/
-  _config/
-  _staging/
-  sessions/
-DouyinLiveRecorder_v4.0.7/
-  ffmpeg/
-```
-
-你可以用下面的命令创建：
-
-```powershell
+```bash
+# Windows PowerShell
 New-Item -ItemType Directory -Force -Path "直播研究数据\_config"
 New-Item -ItemType Directory -Force -Path "直播研究数据\_staging"
 New-Item -ItemType Directory -Force -Path "直播研究数据\sessions"
-New-Item -ItemType Directory -Force -Path "DouyinLiveRecorder_v4.0.7\ffmpeg"
+
+# Linux/Mac
+mkdir -p 直播研究数据/{_config,_staging,sessions}
 ```
 
-这些目录是运行必需的，但它们不会进入 Git。
+#### 5. 配置URL列表
 
-### 第 6 步：准备 urls 文件
+在 `直播研究数据/_config/` 目录下创建URL文件：
 
-在 `直播研究数据/_config` 下创建：
-
-```text
-urls_1.txt
-urls_2.txt
-urls_3.txt
-urls_4.txt
-urls_5.txt
+**urls_1.txt** (录制3段):
+```
+https://tbzb.taobao.com/live?liveId=123456789,店铺名称,已录制0/3
+https://tbzb.taobao.com/live?liveId=987654321,另一个店铺,已录制0/3
 ```
 
-每行格式如下：
-
-```text
-https://tbzb.taobao.com/live?liveId=123456789,直播间名,已录制0/3
+**urls_4.txt** (录制4段):
+```
+https://tbzb.taobao.com/live?liveId=111222333,重点店铺,已录制0/4
 ```
 
-其中：
+> 💡 提示: `urls_1.txt`, `urls_2.txt`, `urls_3.txt`, `urls_5.txt` 每个直播间录3段  
+> `urls_4.txt` 每个直播间录4段
 
-- `urls_1.txt ~ urls_3.txt` 和 `urls_5.txt` 每个直播间录 3 段。
-- `urls_4.txt` 每个直播间录 4 段。
+#### 6. 准备登录Cookie
 
-`urls_4.txt` 示例：
+**方法1: 手动登录** (首次推荐)
 
-```text
-https://tbzb.taobao.com/live?liveId=123456789,直播间名,已录制0/4
+运行单个爬虫实例，完成淘宝登录：
+
+```bash
+python scripts/crawler_instance_1.py
 ```
 
-### 第 7 步：准备登录 Cookie
+登录成功后，Cookie会自动保存到 `直播研究数据/_config/taobao_cookies.json`
 
-仓库不包含 Cookie。你需要准备淘宝登录态。
+**方法2: 导入现有Cookie**
 
-最直接的方式是把你已有的 `taobao_cookies.json` 放到：
+如果已有Cookie，直接复制到 `直播研究数据/_config/taobao_cookies.json`
 
-```text
-直播研究数据/_config/taobao_cookies.json
-```
+---
 
-如果你没有现成 Cookie，可以先单独运行一个爬虫脚本完成登录：
+## 📚 使用说明
+
+### 启动爬虫
+
+**Windows - 隐藏窗口模式** (推荐):
 
 ```powershell
-python taobao_run_edge_1.py urls_1.txt 9223
+# 启动所有5个爬虫实例
+powershell -ExecutionPolicy Bypass -File scripts\start_all_crawlers.ps1
+
+# 查看运行状态
+Get-Process python | Where-Object {$_.CommandLine -match "crawler_instance"}
+
+# 停止所有爬虫
+powershell -ExecutionPolicy Bypass -File scripts\stop_all_crawlers.ps1
 ```
 
-登录成功后脚本会保存 Cookie。之后再用隐藏方式启动 5 个实例。
+**手动启动单个实例** (调试用):
 
-### 第 8 步：准备 ffmpeg
+```bash
+# 启动实例1 (端口9223, urls_1.txt)
+python scripts/crawler_instance_1.py
 
-爬虫使用 ffmpeg 录制直播流。
+# 启动实例2 (端口9224, urls_2.txt)
+python scripts/crawler_instance_2.py
 
-默认路径是：
-
-```text
-DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe
+# ...以此类推
 ```
 
-如果你把 ffmpeg 放在其他位置，可以设置：
+### 数据处理
 
-```powershell
-$env:LIVE_FFMPEG = "你的 ffmpeg.exe 路径"
+#### 解析录制数据
+
+```bash
+# 解析所有暂存数据并归档到sessions
+python scripts/parse_data.py
+
+# 解析指定房间
+python scripts/parse_data.py "直播研究数据\_staging\browser_9223\room_123456789"
 ```
 
-### 第 9 步：准备 Edge
+#### 更新URL状态
 
-代码使用 Microsoft Edge 浏览器。
+```bash
+# 预览更新 (不写入)
+python scripts/update_urls.py
 
-Windows 默认路径通常不需要配置。如果 Edge 安装在特殊位置，可以设置：
-
-```powershell
-$env:LIVE_EDGE_PATH = "你的 msedge.exe 路径"
+# 确认无误后应用更新
+python scripts/update_urls.py --apply
 ```
 
-第一次运行时需要登录淘宝。登录态会保存在：
+#### 收集数字人直播间
 
-```text
-.edge_9223
-.edge_9224
-.edge_9225
-.edge_9226
-.edge_9227
+```bash
+# 自动发现并收集数字人直播间URL
+python scripts/collect_digital.py
 ```
 
-这些目录不会进入 Git。
+---
 
-### 第 10 步：启动爬虫
+## 📁 项目结构
 
-准备完成后，可以用隐藏方式启动 5 个爬虫实例：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File start_crawlers_hidden.ps1
+```
+taobao-live-scraper/
+├── src/                          # 源代码
+│   ├── crawler/                  # 爬虫核心
+│   │   └── taobao_crawler.py     # 主爬虫逻辑
+│   ├── parser/                   # 数据解析
+│   │   └── parse_data.py         # 数据解析器
+│   ├── detector/                 # 数字人检测
+│   │   ├── collect_digital.py    # URL收集器
+│   │   └── detect_digital.py     # 检测脚本
+│   └── utils/                    # 工具模块
+│       ├── config.py             # 配置管理
+│       └── update_urls.py        # URL状态更新
+├── scripts/                      # 可执行脚本
+│   ├── crawler_instance_1.py     # 爬虫实例1
+│   ├── crawler_instance_2.py     # 爬虫实例2
+│   ├── crawler_instance_3.py     # 爬虫实例3
+│   ├── crawler_instance_4.py     # 爬虫实例4
+│   ├── crawler_instance_5.py     # 爬虫实例5
+│   ├── start_all_crawlers.ps1    # 启动所有爬虫
+│   ├── stop_all_crawlers.ps1     # 停止所有爬虫
+│   ├── parse_data.py             # 数据解析入口
+│   ├── update_urls.py            # URL更新入口
+│   └── collect_digital.py        # 收集数字人入口
+├── config/                       # 配置模板
+│   ├── urls_template.txt         # URL配置模板
+│   ├── cookies_template.json     # Cookie模板
+│   └── README.md                 # 配置说明
+├── docs/                         # 文档
+├── examples/                     # 使用示例
+├── 直播研究数据/                 # 数据目录 (不在git中)
+│   ├── _config/                  # 配置文件
+│   │   ├── urls_1.txt ~ urls_5.txt
+│   │   └── taobao_cookies.json
+│   ├── _staging/                 # 录制暂存
+│   └── sessions/                 # 归档数据
+│       └── <店铺名>_<liveId>/
+│           ├── video/            # 视频文件
+│           ├── crawler/          # CSV数据
+│           └── raw/              # 原始JSON
+├── .github/                      # GitHub配置
+├── requirements.txt              # Python依赖
+├── .gitignore                    # Git忽略规则
+└── README.md                     # 本文件
 ```
 
-也可以双击 `start_crawlers_hidden.vbs`。
+---
 
-每个实例对应关系：
+## ⚙️ 环境变量配置
 
-```text
-urls_1.txt -> 9223 -> taobao_run_edge_1.py
-urls_2.txt -> 9224 -> taobao_run_edge_2.py
-urls_3.txt -> 9225 -> taobao_run_edge_3.py
-urls_4.txt -> 9226 -> taobao_run_edge_4.py
-urls_5.txt -> 9227 -> taobao_run_edge_5.py
-```
+可以通过环境变量自定义路径：
 
-## 日常操作
-
-### 解析归档
-
-录制完成后，可以解析并归档：
-
-```powershell
-python parse_taobao_data.py
-```
-
-### 更新 urls 状态
-
-先预览：
-
-```powershell
-python update_urls_v2.py
-```
-
-确认无误后写入：
-
-```powershell
-python update_urls_v2.py --apply
-```
-
-### 数字人直播检测
-
-Node 版本：
-
-```powershell
-node detect_digital_20260806.mjs "C:\path\to\urls.txt"
-```
-
-Python 版本：
-
-```powershell
-python detect_digital_20260806.py <liveId>
-```
-
-### 补齐 7 分钟段 final JSON
-
-```powershell
-python finalize_7min_segments.py
-```
-
-### 查看仪表盘
-
-启动服务：
-
-```powershell
-python _logs/serve_status.py
-```
-
-然后打开：
-
-```text
-http://127.0.0.1:8765
-```
-
-## 环境变量
-
-以下是可配置的环境变量：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
 | `LIVE_STUDY_ROOT` | `./直播研究数据` | 数据根目录 |
-| `LIVE_FFMPEG` | `./DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe` | ffmpeg 可执行文件 |
-| `LIVE_PYTHON` | `python` | Python 可执行文件 |
-| `LIVE_EDGE_PATH` | Windows 默认 Edge 路径 | Edge 可执行文件 |
-| `LIVE_PLAYWRIGHT_CORE_PATH` | 无 | 数字人检测脚本的 `playwright-core` 路径 |
+| `LIVE_FFMPEG` | `./DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe` | FFmpeg路径 |
+| `LIVE_PYTHON` | `python` | Python可执行文件 |
+| `LIVE_EDGE_PATH` | Windows默认Edge路径 | Edge浏览器路径 |
 
-## 常见问题
-
-### 提示 Cookie 过期或没有登录
-
-把新的 `taobao_cookies.json` 放到：
-
-```text
-直播研究数据/_config/taobao_cookies.json
+**Windows示例:**
+```powershell
+$env:LIVE_STUDY_ROOT = "D:\TaobaoData"
+$env:LIVE_FFMPEG = "D:\Tools\ffmpeg\bin\ffmpeg.exe"
 ```
 
-或者重新运行单个爬虫脚本完成登录。
+**Linux/Mac示例:**
+```bash
+export LIVE_STUDY_ROOT="/home/user/taobao_data"
+export LIVE_FFMPEG="/usr/bin/ffmpeg"
+```
 
-### 提示找不到 ffmpeg
+---
 
-确认 ffmpeg 文件存在，或设置：
+## 🔧 常见问题
+
+### 1. Cookie过期或登录失效
+
+**解决方法:**
+- 删除 `直播研究数据/_config/taobao_cookies.json`
+- 重新运行单个爬虫实例进行登录
+- 或手动从浏览器导出新Cookie
+
+### 2. 提示找不到FFmpeg
+
+**解决方法:**
+```bash
+# 检查FFmpeg是否存在
+ffmpeg -version
+
+# 如果已安装但路径不同，设置环境变量
+$env:LIVE_FFMPEG = "实际的ffmpeg.exe路径"
+```
+
+### 3. 爬虫启动后无反应
+
+**可能原因:**
+- 端口被占用 (9223-9227)
+- Edge浏览器未安装
+- 网络连接问题
+
+**检查方法:**
+```powershell
+# 查看爬虫日志
+Get-Content _logs\hidden_launch\crawler_1_*.log -Tail 50
+
+# 检查端口占用
+netstat -ano | findstr "9223"
+```
+
+### 4. 视频录制失败
+
+**检查清单:**
+- ✅ FFmpeg正确安装
+- ✅ 直播间处于开播状态
+- ✅ 网络连接稳定
+- ✅ 硬盘空间充足
+
+### 5. 如何避免账号被封
+
+**建议:**
+- 使用小号进行爬取
+- 不要频繁更换IP
+- 遵守合理的冷却时间 (默认2小时)
+- 不要同时监控过多直播间
+
+---
+
+## 📊 输出数据说明
+
+### sessions目录结构
+
+```
+sessions/<店铺名>_<liveId>/
+├── video/
+│   ├── <店铺名>_video_第1段.flv
+│   ├── <店铺名>_video_第2段.flv
+│   └── <店铺名>_video_第3段.flv
+├── crawler/
+│   ├── lives_summary_<店铺名>_<liveId>.csv      # 直播汇总数据
+│   ├── comments_第1段_<店铺名>_<liveId>.csv     # 第1段弹幕
+│   ├── comments_第2段_<店铺名>_<liveId>.csv     # 第2段弹幕
+│   └── comments_第3段_<店铺名>_<liveId>.csv     # 第3段弹幕
+└── raw/
+    ├── data_20260902_143022_final.json          # 第1段原始数据
+    ├── data_20260902_151534_final.json          # 第2段原始数据
+    └── data_20260902_160047_final.json          # 第3段原始数据
+```
+
+### CSV数据字段
+
+**lives_summary CSV 包含:**
+- 基本信息: 标题、主播名、直播间链接
+- 时间数据: 录制时间、直播时长
+- 互动数据: 弹幕数、观看人数、点赞数、粉丝增长
+- 商品信息: 当前商品名称、价格、直播专属价
+- 标识字段: 是否数字人、品类、店铺类型
+
+**comments CSV 包含:**
+- 用户昵称
+- 弹幕内容
+- 发送时间
+
+---
+
+## 🤝 贡献指南
+
+欢迎提交Issue和Pull Request！
+
+### 开发环境设置
+
+```bash
+# Fork项目并克隆
+git clone https://github.com/YOUR_USERNAME/taobao_scraper.git
+cd taobao_scraper
+
+# 创建开发分支
+git checkout -b feature/your-feature-name
+
+# 安装开发依赖
+pip install -r requirements.txt
+
+# 提交更改
+git add .
+git commit -m "Add: your feature description"
+git push origin feature/your-feature-name
+```
+
+---
+
+## 📄 开源协议
+
+本项目采用 MIT 协议 - 详见 [LICENSE](LICENSE) 文件
+
+---
+
+## ⚠️ 免责声明
+
+本工具仅用于学习和研究目的。使用本工具时请遵守：
+
+- 淘宝平台的服务条款和robots协议
+- 相关法律法规
+- 数据隐私保护要求
+
+请勿将本工具用于：
+- 商业目的
+- 大规模数据采集
+- 侵犯他人隐私的行为
+
+使用本工具产生的一切后果由使用者自行承担。
+
+---
+
+## 📮 联系方式
+
+- GitHub Issues: [提交问题](https://github.com/lengzhanbao/taobao_scraper/issues)
+- Email: your.email@example.com
+
+---
+
+<a name="english"></a>
+
+## 📖 Introduction (English)
+
+**Taobao Live Scraper** is a professional data collection tool for Taobao live streaming, focusing on monitoring, recording, and analyzing digital human live rooms.
+
+### Key Features
+
+✅ **Multi-Instance Parallel Recording** - 5 independent browser instances monitoring different live rooms simultaneously  
+✅ **Smart Digital Human Detection** - Automatically identify digital human anchor live rooms  
+✅ **Complete Data Collection** - Video recording + Barrage capture + Product info + Live data  
+✅ **Automated Archiving** - Automatically parse and organize recorded data  
+✅ **Anti-Ban Design** - Random delays, cooling mechanism, humanized operation simulation  
+
+### Use Cases
+
+- 📊 E-commerce live streaming data research
+- 🤖 Digital human live behavior analysis
+- 📈 Live commerce effectiveness monitoring
+- 💼 Competitive live strategy analysis
+- 🎓 Academic research data collection
+
+---
+
+## 🚀 Quick Start (English)
+
+### System Requirements
+
+- **OS**: Windows 10/11 (recommended), Linux, macOS
+- **Python**: 3.8 or higher
+- **Browser**: Microsoft Edge (Windows) or Chrome/Chromium
+- **FFmpeg**: For video recording
+- **Disk Space**: At least 50GB recommended
+
+### Installation
+
+#### 1. Clone Repository
+
+```bash
+git clone https://github.com/lengzhanbao/taobao_scraper.git
+cd taobao_scraper
+```
+
+#### 2. Install Python Dependencies
+
+```bash
+# Use virtual environment (recommended)
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+# source .venv/bin/activate  # Linux/Mac
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+#### 3. Setup FFmpeg
+
+**Windows:**
+- Download FFmpeg from https://ffmpeg.org/download.html
+- Extract to `DouyinLiveRecorder_v4.0.7/ffmpeg/`
+- Ensure `ffmpeg.exe` is in that directory
+
+**Linux/Mac:**
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Set environment variable
+export LIVE_FFMPEG=$(which ffmpeg)
+```
+
+#### 4. Create Data Directories
+
+```bash
+# Windows PowerShell
+New-Item -ItemType Directory -Force -Path "直播研究数据\_config"
+New-Item -ItemType Directory -Force -Path "直播研究数据\_staging"
+New-Item -ItemType Directory -Force -Path "直播研究数据\sessions"
+
+# Linux/Mac
+mkdir -p 直播研究数据/{_config,_staging,sessions}
+```
+
+#### 5. Configure URL Lists
+
+Create URL files in `直播研究数据/_config/`:
+
+**urls_1.txt** (record 3 segments):
+```
+https://tbzb.taobao.com/live?liveId=123456789,Shop Name,已录制0/3
+```
+
+See Chinese section for detailed format.
+
+#### 6. Setup Login Cookies
+
+**Method 1: Manual Login** (First time recommended)
+
+```bash
+python scripts/crawler_instance_1.py
+```
+
+Login via QR code, cookies will be saved automatically.
+
+**Method 2: Import Existing Cookies**
+
+Copy your cookies to `直播研究数据/_config/taobao_cookies.json`
+
+---
+
+## 📚 Usage (English)
+
+### Start Crawlers
+
+**Windows - Hidden Mode** (Recommended):
 
 ```powershell
-$env:LIVE_FFMPEG = "你的 ffmpeg.exe 路径"
+# Start all 5 crawler instances
+powershell -ExecutionPolicy Bypass -File scripts\start_all_crawlers.ps1
+
+# Check running status
+Get-Process python | Where-Object {$_.CommandLine -match "crawler_instance"}
+
+# Stop all crawlers
+powershell -ExecutionPolicy Bypass -File scripts\stop_all_crawlers.ps1
 ```
 
-### 提示找不到 playwright-core
+### Data Processing
 
-执行：
+#### Parse Recorded Data
 
-```powershell
-npm install playwright-core
+```bash
+# Parse all staged data
+python scripts/parse_data.py
+
+# Parse specific room
+python scripts/parse_data.py "直播研究数据\_staging\browser_9223\room_123456789"
 ```
 
-如果已经安装，仍然找不到，则设置：
+#### Update URL Status
 
-```powershell
-$env:LIVE_PLAYWRIGHT_CORE_PATH = "你的 playwright-core 安装路径"
+```bash
+# Preview updates (dry-run)
+python scripts/update_urls.py
+
+# Apply updates
+python scripts/update_urls.py --apply
 ```
 
-### 提示 Edge 找不到
+#### Collect Digital Live Rooms
 
-设置 Edge 路径：
-
-```powershell
-$env:LIVE_EDGE_PATH = "你的 msedge.exe 路径"
+```bash
+# Discover and collect digital human live room URLs
+python scripts/collect_digital.py
 ```
 
-### sessions 会不会被上传
+---
 
-不会。`直播研究数据/` 已经被 `.gitignore` 排除，`sessions` 会保留在你本机。
+## 📄 License
 
-## 最后说明
+This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
 
-- 这个仓库只包含运行代码。
-- 数据、结果、日志、Cookie、Edge profile 和 `sessions` 都不会进入 Git。
-- 第一次运行可能需要登录淘宝。
-- 如果只是录制，最少需要准备：Python、ffmpeg、urls 文件、Cookie 和 Edge。
-- 如果需要数字人检测，还需要 Node.js 和 `playwright-core`。
+---
+
+## ⚠️ Disclaimer
+
+This tool is for educational and research purposes only. Users must comply with Taobao's terms of service and local laws. The author is not responsible for any misuse.
+
+---
+
+## 🔍 SEO Keywords / 搜索关键词
+
+**中文：** 淘宝直播爬虫, 淘宝直播录制, 淘宝直播数据采集, 直播录制工具, 弹幕爬虫, 弹幕抓取, 数字人检测, 数字人直播, 虚拟主播检测, AI主播识别, 电商直播分析, 直播带货数据, 竞品直播监控, 直播间监控, 商品信息采集, 淘宝API采集, 直播数据研究, Python爬虫, DrissionPage实战, FFmpeg录制, mtop接口解析
+
+**English:** Taobao Live Scraper, Taobao Live Recorder, live stream recorder, live data collection, barrage scraper, danmaku crawler, comment抓取 crawler, digital human detection, virtual anchor detection, AI streamer detection, e-commerce live analysis, live commerce monitoring, livestream monitoring, product info scraping, Taobao API scraping, mtop API parsing, DrissionPage example, FFmpeg recording, Python web scraping, live detail.get parser
+
+**Related searches / 相关搜索：** tbzb.taobao.com 爬虫, live.detail.get 解析, isDigitalAnchorLive 检测, 淘宝直播弹幕接口, mtop.tblive 解析, 淘宝直播录屏, 直播间批量监控, 无人直播检测, 直播数据CSV导出
+

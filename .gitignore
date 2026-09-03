@@ -1,63 +1,92 @@
-# Data, results, and runtime state
+# Data directories
 /直播研究数据/
 /_outputs/
 /_archive/
-/_session_rollback_20260809/
-/docs/
+/_logs/
 /数字人确认_*.txt
 
-# Runtime logs and local dashboard state
-/_logs/*
-!/_logs/serve_status.py
-!/_logs/dashboard.html
-!/_logs/打开仪表盘.bat
-/_logs/dashboard.html
-/_logs/打开仪表盘.bat
-/启动爬虫_5实例.bat
-
-# Browser profiles and sync caches
+# Browser profiles
 /.edge_9223/
 /.edge_9224/
 /.edge_9225/
 /.edge_9226/
 /.edge_9227/
+/.edge_data/
+/.chrome_data/
+/.chromium_data/
+
+# Runtime dependencies
+/DouyinLiveRecorder_v4.0.7/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Credentials and secrets
+.env
+.env.*
+*.pem
+**/taobao_cookies.json
+**/taobao_cookies.txt
+**/taobao_cookies_*.txt
+**/live_urls.txt
+
+# Backups
+*.bak
+*.backup
+*.old
+
+# Feature extraction outputs
+*_features.json
+/features_output/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Daily URL backups written by mark_recorded()
+*.bak_*
+
+# Legacy v1 runtime leftovers (kept from pre-2.0 history)
+/_session_rollback_20260809/
+/启动爬虫_5实例.bat
 /.quark_data/
 /.quark_data_0/
 /.quark_data_1/
 /.quark_data_2/
 /.quark_data0/
 /.workbuddy/
-/.chrome_data/
-/.chromium_data/
-/.edge_data/
 /.edge_test/
 /.digital_check_*/
 /.digital_playwright_profile_test/
 /.edge_digital_check/
-
-# Vendored runtime
-/DouyinLiveRecorder_v4.0.7/
-
-# Generated Python
-__pycache__/
-*.py[cod]
-.venv/
-
-# Node
-node_modules/
-package-lock.json
-
-# Backups and scratch files
-*.bak
 *.bak0801
 *.bak0801_1605
 *.pre_slider.bak
 *.bugfix0801.bak
 *.1101.bak
-
-# Secrets and local credentials
-.env
-.env.*
-*.pem
-**/taobao_cookies.json
-**/taobao_cookies.txt

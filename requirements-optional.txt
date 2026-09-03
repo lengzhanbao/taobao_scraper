@@ -1,0 +1,10 @@
+# Taobao Live Scraper - Optional Dependencies
+# Install: pip install -r requirements-optional.txt
+# Needed only for feature extraction / data analysis, not for recording.
+
+numpy>=1.24.0
+pandas>=2.0.0
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+librosa>=0.10.0
+scipy>=1.11.0

@@ -6,7 +6,9 @@
 
 import os, sys, time, json, re, random
 
-from config import STUDY_ROOT
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from src.utils.config import STUDY_ROOT
 OUTDIR = os.path.join(STUDY_ROOT, "_staging")
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", "live_urls.txt")
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")

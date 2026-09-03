@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 淘宝直播 Edge — 参数化多实例版
-用法: python taobao_run_edge.py urls_3.txt 9223
+用法: python taobao_run_edge.py urls_1.txt 9223
 - 每个实例读自己的 URL 文件、自己的端口、自己的输出目录
 - 随机抽 → 录20分 → 冷却2h → 每房间3轮
 """
@@ -9,7 +9,7 @@ import os, sys, time, json, re, subprocess, threading, datetime, random
 
 if len(sys.argv) < 3:
     print("用法: python taobao_run_edge.py <urls文件名> <端口> [启动延迟秒数]")
-    print("例如: python taobao_run_edge.py urls_3.txt 9223 30")
+    print("例如: python taobao_run_edge.py urls_1.txt 9223 30")
     sys.exit(1)
 
 # 控制台编码兜底：输出重定向到文件时 Python 会退回 GBK，emoji 日志会崩（必须在任何 print 之前）
@@ -22,7 +22,9 @@ DELAY = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 if DELAY:
     print(f"⏳ 延迟 {DELAY}s 启动..."); time.sleep(DELAY)
 
-from config import STUDY_ROOT, FFMPEG
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from src.utils.config import STUDY_ROOT, FFMPEG
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", sys.argv[1])
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
@@ -74,6 +76,7 @@ def clean_staging():
                     log("[clean] remove <7min seg: " + seg)
 
 state = {"collected": [], "stream_url": {"url": None}}
+MAX_COLLECTED = int(os.environ.get("LIVE_MAX_COLLECTED", "800"))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 SEG_NAMES = ["第一段", "第二段", "第三段"]
 
@@ -198,7 +201,10 @@ def listen_loop():
                     snippet = str(body)[:800000]
             except:
                 snippet = None
+            # 内存保护：只保留最近 MAX_COLLECTED 条，防止长录制把内存吃满
             state["collected"].append({"t": round(time.time(),1), "url": url, "body": snippet})
+            if len(state["collected"]) > MAX_COLLECTED:
+                del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
 
 def read_urls():
     """读 URL 文件，返回 [(url, lid, 已录次数, 目标次数)]"""
@@ -525,8 +531,13 @@ def finalize_room(lid):
     """房间录满 → 调 parse(复制JSON+FLV到sessions, 生成CSV) → 删staging FLV"""
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
 
-    # 调用 parse_taobao_data.py（会复制FLV到sessions/video）
-    parse_script = os.path.join(os.path.dirname(STUDY_ROOT), "parse_taobao_data.py")
+    # v2.0 路径：scripts/parse_data.py（兼容 v1.0 的 parse_taobao_data.py）
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates = [
+        os.path.join(project_root, "scripts", "parse_data.py"),
+        os.path.join(os.path.dirname(STUDY_ROOT), "parse_taobao_data.py"),
+    ]
+    parse_script = next((p for p in candidates if os.path.exists(p)), candidates[0])
     parse_ok = False
     if os.path.exists(parse_script):
         try:
