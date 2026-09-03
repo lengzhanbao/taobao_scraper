@@ -15,7 +15,7 @@ with open('requirements.txt', 'r', encoding='utf-8') as f:
 
 setup(
     name='taobao-live-scraper',
-    version='2.0.1',
+    version='2.0.2',
     author='Taobao Live Scraper Contributors',
     author_email='your.email@example.com',
     description='A professional tool for Taobao live streaming data collection and analysis',
