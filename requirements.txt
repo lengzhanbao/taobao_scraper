@@ -1,14 +1,7 @@
-# Taobao Live Scraper - Python Dependencies
+# Taobao Live Scraper - Core Dependencies
 # Install: pip install -r requirements.txt
+# Full features: pip install -r requirements-optional.txt
 
-# Core crawler dependencies
-DrissionPage>=4.0.0
+# Core crawler dependencies (required)
+DrissionPage>=4.0.0,<5
 requests>=2.28.0
-
-# Data analysis (optional, for feature extraction)
-numpy>=1.24.0
-pandas>=2.0.0
-opencv-python>=4.8.0
-mediapipe>=0.10.0
-librosa>=0.10.0
-scipy>=1.11.0

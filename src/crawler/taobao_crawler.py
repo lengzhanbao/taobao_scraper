@@ -76,6 +76,7 @@ def clean_staging():
                     log("[clean] remove <7min seg: " + seg)
 
 state = {"collected": [], "stream_url": {"url": None}}
+MAX_COLLECTED = int(os.environ.get("LIVE_MAX_COLLECTED", "800"))
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 SEG_NAMES = ["第一段", "第二段", "第三段"]
 
@@ -200,7 +201,10 @@ def listen_loop():
                     snippet = str(body)[:800000]
             except:
                 snippet = None
+            # 内存保护：只保留最近 MAX_COLLECTED 条，防止长录制把内存吃满
             state["collected"].append({"t": round(time.time(),1), "url": url, "body": snippet})
+            if len(state["collected"]) > MAX_COLLECTED:
+                del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
 
 def read_urls():
     """读 URL 文件，返回 [(url, lid, 已录次数, 目标次数)]"""
@@ -527,8 +531,13 @@ def finalize_room(lid):
     """房间录满 → 调 parse(复制JSON+FLV到sessions, 生成CSV) → 删staging FLV"""
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
 
-    # 调用 parse_taobao_data.py（会复制FLV到sessions/video）
-    parse_script = os.path.join(os.path.dirname(STUDY_ROOT), "parse_taobao_data.py")
+    # v2.0 路径：scripts/parse_data.py（兼容 v1.0 的 parse_taobao_data.py）
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates = [
+        os.path.join(project_root, "scripts", "parse_data.py"),
+        os.path.join(os.path.dirname(STUDY_ROOT), "parse_taobao_data.py"),
+    ]
+    parse_script = next((p for p in candidates if os.path.exists(p)), candidates[0])
     parse_ok = False
     if os.path.exists(parse_script):
         try:

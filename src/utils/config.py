@@ -5,7 +5,9 @@ Handles all path and environment variable configurations
 """
 import os
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 兼容旧引用：BASE_DIR 即项目根目录
+PROJECT_ROOT = BASE_DIR
 
 
 def _get_env_path(env_name, default_path):

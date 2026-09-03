@@ -359,14 +359,29 @@ def main():
         process_room(sys.argv[1])
         return
 
-    files = sorted(glob.glob(os.path.join(STUDY_ROOT, "_staging", "data_*.json")), key=os.path.getmtime)
-    if not files:
-        print("staging 没有 data_*.json")
+    # 全量模式：遍历 _staging/browser_*/room_*/*_final.json
+    staging_root = os.path.join(STUDY_ROOT, "_staging")
+    if not os.path.isdir(staging_root):
+        print(f"staging 目录不存在: {staging_root}")
         return
-    print(f"发现 {len(files)} 个文件")
-    for f in files:
-        try: process(f)
-        except Exception as e: print(f"[跳过] {e}")
+    room_dirs = []
+    for browser in sorted(os.listdir(staging_root)):
+        bpath = os.path.join(staging_root, browser)
+        if not os.path.isdir(bpath):
+            continue
+        for room in sorted(os.listdir(bpath)):
+            rpath = os.path.join(bpath, room)
+            if os.path.isdir(rpath) and room.startswith("room_"):
+                room_dirs.append(rpath)
+    if not room_dirs:
+        print("staging 没有 room_* 目录")
+        return
+    print(f"发现 {len(room_dirs)} 个房间目录")
+    for room_dir in room_dirs:
+        try:
+            process_room(room_dir)
+        except Exception as e:
+            print(f"[跳过] {room_dir}: {e}")
 
 
 if __name__ == "__main__":

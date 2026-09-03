@@ -15,14 +15,15 @@ with open('requirements.txt', 'r', encoding='utf-8') as f:
 
 setup(
     name='taobao-live-scraper',
-    version='2.0.0',
+    version='2.0.1',
     author='Taobao Live Scraper Contributors',
     author_email='your.email@example.com',
     description='A professional tool for Taobao live streaming data collection and analysis',
     long_description=long_description,
     long_description_content_type='text/markdown',
     url='https://github.com/lengzhanbao/taobao_scraper',
-    packages=find_packages(),
+    packages=find_packages(where='src'),
+    package_dir={'': 'src'},
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',

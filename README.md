@@ -584,7 +584,11 @@ This tool is for educational and research purposes only. Users must comply with 
 
 ---
 
-## 🔍 SEO Keywords
+## 🔍 SEO Keywords / 搜索关键词
 
-淘宝直播爬虫, Taobao Live Scraper, 直播录制工具, Live Stream Recorder, 数字人检测, Digital Human Detection, 电商直播分析, E-commerce Live Analysis, 直播数据采集, Live Data Collection, 弹幕爬虫, Barrage Scraper, Python爬虫, Web Scraper, 淘宝API, Taobao API
+**中文：** 淘宝直播爬虫, 淘宝直播录制, 淘宝直播数据采集, 直播录制工具, 弹幕爬虫, 弹幕抓取, 数字人检测, 数字人直播, 虚拟主播检测, AI主播识别, 电商直播分析, 直播带货数据, 竞品直播监控, 直播间监控, 商品信息采集, 淘宝API采集, 直播数据研究, Python爬虫, DrissionPage实战, FFmpeg录制, mtop接口解析
+
+**English:** Taobao Live Scraper, Taobao Live Recorder, live stream recorder, live data collection, barrage scraper, danmaku crawler, comment抓取 crawler, digital human detection, virtual anchor detection, AI streamer detection, e-commerce live analysis, live commerce monitoring, livestream monitoring, product info scraping, Taobao API scraping, mtop API parsing, DrissionPage example, FFmpeg recording, Python web scraping, live detail.get parser
+
+**Related searches / 相关搜索：** tbzb.taobao.com 爬虫, live.detail.get 解析, isDigitalAnchorLive 检测, 淘宝直播弹幕接口, mtop.tblive 解析, 淘宝直播录屏, 直播间批量监控, 无人直播检测, 直播数据CSV导出
 

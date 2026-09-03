@@ -38,3 +38,9 @@ jobs:
     - name: Test imports
       run: |
         python -c "from src.utils.config import STUDY_ROOT, FFMPEG; print('Config import OK')"
+        python -c "import ast; ast.parse(open('src/crawler/taobao_crawler.py', encoding='utf-8').read()); print('Crawler syntax OK')"
+        python -c "import ast; ast.parse(open('src/parser/parse_data.py', encoding='utf-8').read()); print('Parser syntax OK')"
+
+    - name: Verify structure
+      run: |
+        python verify_structure.py

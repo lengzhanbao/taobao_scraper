@@ -52,6 +52,8 @@ desktop.ini
 *.pem
 **/taobao_cookies.json
 **/taobao_cookies.txt
+**/taobao_cookies_*.txt
+**/live_urls.txt
 
 # Backups
 *.bak
@@ -66,3 +68,6 @@ desktop.ini
 *.tmp
 *.temp
 *.log
+
+# Daily URL backups written by mark_recorded()
+*.bak_*
