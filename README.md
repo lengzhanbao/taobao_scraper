@@ -1,6 +1,6 @@
 # Taobao Live Scraper / 淘宝直播爬虫
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/lengzhanbao/taobao_scraper.svg)](https://github.com/lengzhanbao/taobao_scraper/stargazers)
 
@@ -37,7 +37,7 @@
 ### 系统要求
 
 - **操作系统**: Windows 10/11 (推荐), Linux, macOS
-- **Python**: 3.8 或更高版本
+- **Python**: 3.9 或更高版本
 - **浏览器**: Microsoft Edge (Windows) 或 Chrome/Chromium
 - **FFmpeg**: 用于视频录制
 - **硬盘空间**: 建议至少 50GB (用于视频存储)
@@ -440,7 +440,7 @@ git push origin feature/your-feature-name
 ### System Requirements
 
 - **OS**: Windows 10/11 (recommended), Linux, macOS
-- **Python**: 3.8 or higher
+- **Python**: 3.9 or higher
 - **Browser**: Microsoft Edge (Windows) or Chrome/Chromium
 - **FFmpeg**: For video recording
 - **Disk Space**: At least 50GB recommended

@@ -15,7 +15,7 @@ with open('requirements.txt', 'r', encoding='utf-8') as f:
 
 setup(
     name='taobao-live-scraper',
-    version='2.0.2',
+    version='2.0.3',
     author='Taobao Live Scraper Contributors',
     author_email='your.email@example.com',
     description='A professional tool for Taobao live streaming data collection and analysis',
@@ -32,13 +32,12 @@ setup(
         'Topic :: Scientific/Engineering :: Information Analysis',
         'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Operating System :: OS Independent',
     ],
-    python_requires='>=3.8',
+    python_requires='>=3.9',
     install_requires=requirements,
     keywords=[
         'taobao', 'live', 'scraper', 'crawler', 'e-commerce',
