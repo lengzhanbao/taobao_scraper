@@ -592,3 +592,19 @@ This tool is for educational and research purposes only. Users must comply with 
 
 **Related searches / 相关搜索：** tbzb.taobao.com 爬虫, live.detail.get 解析, isDigitalAnchorLive 检测, 淘宝直播弹幕接口, mtop.tblive 解析, 淘宝直播录屏, 直播间批量监控, 无人直播检测, 直播数据CSV导出
 
+
+## 2026-09-29 GitHub 上传版检查记录
+
+检查对象：本仓库 `main` 的提交 `6182db314417293b3eec5f1af6f8b8c1a4bdc2cb`。本记录仅针对该上传版本；只做静态检查和仓库自带测试，未启动淘宝登录、直播采集或数据解析入口，因此不代表真实采集已验证通过。
+
+### 检查结果
+
+- `python -m pytest tests/ -q`：7 项通过；爬虫和解析器语法检查通过。
+- Windows 默认编码运行 `python verify_structure.py` 会因 GBK 无法输出 `✓` 而报 `UnicodeEncodeError`；`python -X utf8 verify_structure.py` 通过。
+- 本次审查环境为 Python 3.11.7，未安装 `DrissionPage`。系统 PATH 能找到 FFmpeg，但全新副本缺少默认配置路径 `DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe`。部署时需安装 `requirements.txt` 依赖，并将 `LIVE_FFMPEG` 配为实际可执行文件路径。
+
+### 尚未修复风险（运行前请先处理）
+
+1. `scripts/collect_digital.py` 启动时强制结束系统中全部 `ffmpeg.exe` 和 `msedge.exe`，可能中断其他录制并关闭其他 Edge。不要在修复前运行该入口。[代码位置](https://github.com/lengzhanbao/taobao_scraper/blob/6182db314417293b3eec5f1af6f8b8c1a4bdc2cb/src/detector/collect_digital.py#L30-L42)
+2. 主爬虫启动清理会递归删除部分没有 `_final.json` 的暂存段；录制时还会清理已有但未完成的段目录，可能造成数据丢失。修复清理逻辑并确认备份后，再对已有数据目录运行。[代码位置](https://github.com/lengzhanbao/taobao_scraper/blob/6182db314417293b3eec5f1af6f8b8c1a4bdc2cb/src/crawler/taobao_crawler.py#L42-L77)
+3. 全新配置缺少 `taobao_cookies.json` 时，主爬虫会直接读取该文件并退出，未进入手动登录流程。README 声称爬虫登录后自动保存 Cookie，但主爬虫代码没有找到写入该 JSON 的逻辑，文档与实现不一致。[代码位置](https://github.com/lengzhanbao/taobao_scraper/blob/6182db314417293b3eec5f1af6f8b8c1a4bdc2cb/src/crawler/taobao_crawler.py#L620-L630)
