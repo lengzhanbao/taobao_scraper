@@ -407,7 +407,7 @@ git push origin feature/your-feature-name
 ## 📮 联系方式
 
 - GitHub Issues: [提交问题](https://github.com/lengzhanbao/taobao_scraper/issues)
-- Email: your.email@example.com
+- Email: 3496458527@qq.com
 
 ---
 
