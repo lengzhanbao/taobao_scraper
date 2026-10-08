@@ -1,9 +1,23 @@
 """Validated settings and URL snapshots; no writes to original URL lists."""
 from pathlib import Path
+import os
 import re
+import shutil
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def default_edge_path():
+    if os.name == "nt":
+        return r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    for executable in ("microsoft-edge", "msedge", "google-chrome", "chromium", "chromium-browser"):
+        candidate = shutil.which(executable)
+        if candidate:
+            return candidate
+    if sys.platform == "darwin":
+        return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    return "/usr/bin/chromium"
 
 
 def defaults(study_root=None):
@@ -15,7 +29,7 @@ def defaults(study_root=None):
         "python": str(python_path),
         "ffmpeg": str(ROOT / "DouyinLiveRecorder_v4.0.7" / "ffmpeg" / "ffmpeg.exe"),
         "ffprobe": str(ROOT / "DouyinLiveRecorder_v4.0.7" / "ffmpeg" / "ffprobe.exe"),
-        "edge": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        "edge": default_edge_path(),
         "max_minutes": 20, "cooldown_minutes": 120, "batch_rooms": 6,
         "launch_gap_seconds": 45,
         "instances": [{"id": i, "enabled": True, "port": 9222 + i,
