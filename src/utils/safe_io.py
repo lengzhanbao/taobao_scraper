@@ -1,6 +1,7 @@
 """Small data-preserving helpers. No helper removes source recordings."""
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -57,9 +58,15 @@ def probe_video(path, ffprobe):
     )
     if result.returncode:
         raise ValueError("ffprobe 无法读取视频")
-    info = json.loads(result.stdout)
-    duration = float(info.get("format", {}).get("duration", 0))
-    if duration <= 0 or not any(s.get("codec_type") == "video" for s in info.get("streams", [])):
+    try:
+        info = json.loads(result.stdout)
+        duration = float(info.get("format", {}).get("duration", 0))
+        streams = info.get("streams", [])
+        has_video = isinstance(streams, list) and any(isinstance(item, dict) and
+                    item.get("codec_type") == "video" for item in streams)
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("ffprobe 返回的媒体信息不完整")
+    if not math.isfinite(duration) or duration <= 0 or not has_video:
         raise ValueError("视频没有有效时长或视频轨道")
     return duration
 

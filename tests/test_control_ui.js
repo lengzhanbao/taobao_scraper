@@ -7,6 +7,8 @@ const vm = require("node:vm");
 const elements = new Map();
 const intervals=[];
 let failState=false;
+let hangState=false;
+let hangAction=false;
 class Element {
   constructor(tag="div") {
     this.tag=tag;this.children=[];this.dataset={};this.listeners={};this.attributes={};
@@ -30,17 +32,23 @@ const fixture = {token:"synthetic",version:"2.4-local-panel",code_root:"syntheti
   settings:{study_root:"synthetic",python:"python",edge:"edge",ffmpeg:"ffmpeg",ffprobe:"ffprobe",
     max_minutes:1,cooldown_minutes:120,batch_rooms:1,launch_gap_seconds:0,instances:[]},
   instances:[instance(1,3,1),instance(2,1,1,4),instance(3,0,0),instance(4,0,0),instance(5,0,0)],
-  totals:{rooms:2,completed_rooms:1,recorded_segments:5,valid_segments:2,archived_segments:1,remaining_segments:2,target_segments:4,completed_segments:2,unverified_rooms:0},
+  totals:{rooms:2,completed_rooms:1,recorded_segments:5,valid_segments:2,archived_segments:1,remaining_segments:2,target_segments:4,completed_segments:2,unverified_rooms:0,
+    digital_markers:{all_true:1,not_all_true:1,missing:0}},
   jobs:[{instance_id:1,alive:true,phase:"paused",pause_supported:true,pause_requested:true,status:{}},
     {instance_id:2,alive:true,phase:"recording",pause_supported:true,pause_requested:false,
       status:{live_id:"123",segment_index:1,elapsed_seconds:45,planned_duration_seconds:60}}]};
 fixture.settings.instances=fixture.instances;
 const requests=[];
-const context=vm.createContext({console,setInterval(callback,ms){intervals.push({callback,ms});},window:{confirm:()=>true},document:{
+const context=vm.createContext({console,AbortController,
+  setTimeout(callback,ms){return setTimeout(callback,(hangState&&ms===10000)||(hangAction&&ms===90000)?5:ms);},clearTimeout,
+  setInterval(callback,ms){intervals.push({callback,ms});},window:{confirm:()=>true},document:{
   getElementById(id){if(!elements.has(id)){const element=new Element();element.id=id;}return elements.get(id);},
   createElement(tag){return new Element(tag);},addEventListener(){}
 },fetch:async(route,options)=>{
   requests.push({route,options});
+  if((route==="/api/state"&&hangState)||(options?.method==="POST"&&hangAction))return new Promise((resolve,reject)=>{
+    options.signal.addEventListener('abort',()=>{const error=new Error('synthetic abort');error.name='AbortError';reject(error);},{once:true});
+  });
   if(route==="/api/state"){if(failState)throw new Error("synthetic offline");return {ok:true,json:async()=>fixture};}
   if(route.startsWith('/api/urls'))return {ok:true,json:async()=>({instance_id:1,path:'synthetic/urls_1.txt',revision:'abc',active_text:'https://tbzb.taobao.com/live?liveId=123',rows:[{live_id:'123',count:1,target:3,valid_count:null,archived_count:0,validation_state:'未核验'}],message:'saved',correction_id:'synthetic-correction'})};
   return {ok:true,json:async()=>({message:"synthetic action accepted"})};
@@ -54,6 +62,8 @@ async function main() {
   assert.equal(elements.get("total-progress").value,50);
   assert.equal(elements.get("verified").textContent,"2");
   assert.equal(elements.get("archived").textContent,"1");
+  assert.equal(elements.get("all-true-segments").textContent,"1");
+  assert.equal(elements.get("not-all-true-segments").textContent,"1");
   assert.match(elements.get("total-progress-text").textContent,/2 \/ 4 有效段/);
   const rows=elements.get("instance-rows").children;
   assert.match(rows[1].children[4].textContent,/1 \/ 1 有效段 · 100.0%/);
@@ -137,6 +147,25 @@ async function main() {
   assert.equal(elements.get("connection-state").textContent,"控制台已连接");
   assert.match(elements.get("last-sync").textContent,/最后同步/);
   assert.equal(elements.get("correct-live-id").disabled,false);
+  hangState=true;
+  const before=requests.filter(request=>request.route==='/api/state').length;
+  const first=vm.runInContext('refresh()',context);
+  const concurrent=vm.runInContext('refresh()',context);
+  assert.equal(first,concurrent);
+  await assert.rejects(first,/请求超时/);
+  assert.equal(requests.filter(request=>request.route==='/api/state').length,before+1);
+  await assert.rejects(vm.runInContext('refresh()',context),/请求超时/);
+  assert.equal(elements.get("run-status").textContent,"后台连接中断");
+  assert.match(elements.get("instance-rows").children[1].children[6].textContent,/未同步/);
+  assert.match(elements.get("version").textContent,/上次版本/);
+  hangState=false;
+  await vm.runInContext('refresh()',context);
+  assert.equal(elements.get("connection-state").textContent,"控制台已连接");
+  hangAction=true;
+  const mutationsBefore=requests.filter(request=>request.options?.method==='POST').length;
+  await assert.rejects(vm.runInContext('api("/api/urls",{instance_id:1})',context),/后台可能已完成/);
+  assert.equal(requests.filter(request=>request.options?.method==='POST').length,mutationsBefore+1);
+  hangAction=false;
   console.log("Dashboard checks passed: verified-only progress, disconnected/recovered state, version, pause/resume, URLs.");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

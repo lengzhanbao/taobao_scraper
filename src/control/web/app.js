@@ -8,14 +8,25 @@ let urlDocument = null;
 let urlDirty = false;
 let refreshFailures = 0;
 let connectionLost = false;
+let stateRefreshPromise = null;
 const $ = id => document.getElementById(id);
 const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
 function message(text, error=false) { $("message").hidden=false; $("message").textContent=text; $("message").classList.toggle("error",error); }
 async function api(path, data) {
-  const response = await fetch(path, data===undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify(data)});
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "请求失败");
-  return result;
+  const controller = new AbortController();
+  const timeout = setTimeout(()=>controller.abort(),data===undefined?10000:90000);
+  try {
+    const options = data===undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify(data)};
+    options.signal=controller.signal;
+    const response = await fetch(path,options);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "请求失败");
+    return result;
+  } catch(error) {
+    if(controller.signal.aborted) throw new Error(data===undefined?"后台请求超时（10秒）":
+      "操作请求超时，后台可能已完成；请刷新核对后再操作。");
+    throw error;
+  } finally { clearTimeout(timeout); }
 }
 function settingsFromForm() {
   const config=JSON.parse(JSON.stringify(state.settings));
@@ -64,8 +75,8 @@ function renderInstances() {
     tr.children[5].replaceChildren(label);
     if(job?.alive&&job.phase==="waiting"&&job.status?.reason) {const reason=document.createElement("small");reason.textContent=job.status.reason;tr.children[5].append(reason);}
     const s=job?.status;const current=job?.alive&&["scanning","connecting","recording","validating"].includes(job.phase);
-    tr.children[6].textContent=current&&s?.live_id?"第 "+(s.segment_index||"—")+" 段 · "+s.live_id:"—";
-    if(job?.alive&&job.phase==="recording") {
+    tr.children[6].textContent=connectionLost?"连接中断 · 当前录制未同步":current&&s?.live_id?"第 "+(s.segment_index||"—")+" 段 · "+s.live_id:"—";
+    if(!connectionLost&&job?.alive&&job.phase==="recording") {
       const limit=s.planned_duration_seconds??state.settings.max_minutes*60;
       tr.children[6].append(progressBlock(s.elapsed_seconds||0,limit,"已运行 "+duration(s.elapsed_seconds)+" / 上限 "+duration(limit)));
     }
@@ -83,7 +94,12 @@ function renderChecks(result) {
   $("checks").className="check-grid";$("checks").replaceChildren();
   for(const item of result.checks) {const row=document.createElement("div");row.className="check-item";const mark=document.createElement("span");mark.className="check-mark"+(!item.ok?" bad":"");mark.textContent=item.ok?"✓":item.required?"!":"○";const content=document.createElement("div");content.textContent=item.name;const detail=document.createElement("small");detail.textContent=item.detail;content.append(detail);row.append(mark,content);$("checks").append(row);}
 }
-async function refresh() {
+function refresh() {
+  if(stateRefreshPromise)return stateRefreshPromise;
+  stateRefreshPromise=refreshState().finally(()=>{stateRefreshPromise=null;});
+  return stateRefreshPromise;
+}
+async function refreshState() {
   let latest;
   try {
     latest=await api("/api/state");
@@ -96,6 +112,7 @@ async function refresh() {
       $("run-status").textContent="后台连接中断";
       $("run-detail").textContent="采集子进程可能仍在运行，面板暂时无法确认状态。";
       $("run-dot").classList.toggle("green",false);
+      $("version").textContent=state?.version?"上次版本："+state.version:"版本未获取";
       $("start").disabled=true;$("stop").disabled=true;$("check").disabled=true;
       for(const id of ["url-instance","url-text","url-add-text","url-import","url-load","url-reload",
                        "url-save","url-append","correct-live-id","correct-count","correct-reason",
@@ -110,6 +127,11 @@ async function refresh() {
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
   $("verified").textContent=state.totals.valid_segments==null?"未核验":state.totals.valid_segments;$("archived").textContent=state.totals.archived_segments??0;
   $("verified-note").textContent=state.totals.unverified_rooms?"至少为已核验数量；"+state.totals.unverified_rooms+" 间房缺少凭据":"依据视频与 final JSON 凭据复核";
+  const markers=state.totals.digital_markers;
+  const markerKnown=markers&&state.totals.valid_segments!=null;
+  $("all-true-segments").textContent=markerKnown?markers.all_true:"未核验";
+  $("not-all-true-segments").textContent=markerKnown?markers.not_all_true:"未核验";
+  $("flag-note").textContent=markerKnown?"另有 "+markers.missing+" 段未捕获可识别标记；仅记录，不新增样本分类":"先核验录制凭据，再显示已捕获标记";
   const target=state.totals.target_segments??(state.totals.recorded_segments+state.totals.remaining_segments);
   const completed=state.totals.completed_segments;
   const unverified=state.totals.unverified_rooms??0;
@@ -179,7 +201,13 @@ function showUrlDocument(result) {
   $("url-note").textContent="已加载 · 保存会保留原文件备份";
   $("url-count").textContent=result.rows.length+" 间";
   $("url-rows").replaceChildren();
-  for(const row of result.rows) {const tr=document.createElement("tr");tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.valid_count==null?"未核验":row.valid_count),cell(row.archived_count??0),cell(row.validation_state||(row.count>=row.target?"历史计数已满":"待录制")));$("url-rows").append(tr);}
+  for(const row of result.rows) {
+    const tr=document.createElement("tr"),markers=row.digital_markers;
+    const flags=markers&&row.valid_count!=null?markers.all_true+" / "+markers.not_all_true+" / "+markers.missing:"未核验";
+    tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.valid_count==null?"未核验":row.valid_count),
+      cell(flags),cell(row.archived_count??0),cell(row.validation_state||(row.count>=row.target?"历史计数已满":"待录制"),
+      row.archive_issues?.length?"归档待核查："+row.archive_issues[0]:null));$("url-rows").append(tr);
+  }
   const elsewhere=new Map();
   // Cross-instance duplicates are also checked authoritatively before starting.
   for(const i of state.instances) if(i.id!==result.instance_id&&i.rooms)elsewhere.set(i.id,i.rooms);

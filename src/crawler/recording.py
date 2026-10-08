@@ -8,6 +8,7 @@ import subprocess
 import time
 import uuid
 from src.utils.safe_io import atomic_json, probe_video
+from src.utils.segment_evidence import video_validation, digital_observation
 
 
 def stop_recorder(process):
@@ -156,10 +157,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
         publish_status("validating", elapsed_seconds=round(end_t - start_t), remaining_seconds=0)
         if first_data_t is None or failure is not None or journal_error:
             raise ValueError(failure or "接流失败或响应日志写入失败")
-        duration = probe_video(video, ffprobe)
-        minimum = min(420, max_minutes * 60 * 0.9)
-        if duration < minimum:
-            raise ValueError(f"实际视频时长 {duration:.1f} 秒，少于本次最低有效时长 {minimum:.1f} 秒")
+        validation = video_validation(video, {"max_minutes": max_minutes}, ffprobe, probe=probe_video)
+        duration = validation["duration_seconds"]
         with journal_path.open(encoding="utf-8") as stream:
             responses = [json.loads(line) for line in stream if line.strip()]
         payload = {
@@ -169,15 +168,24 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "video_duration_seconds": duration, "timing_basis": "wall_clock_from_ffmpeg_launch",
             "max_minutes": max_minutes, "product_timeline": timeline,
             "captured_count": len(responses), "responses": responses,
+            "technical_validation": validation,
         }
+        payload["digital_observation"] = digital_observation(payload, live_id)
         atomic_json(attempt_dir / f"data_{ts}_final.json", payload)
         publish_status("segment_completed", video_duration_seconds=duration)
         log(f"  ✅ {seg_name} 完成，ffprobe 时长 {duration:.1f} 秒；原始视频保留")
         return True
     except Exception as error:
+        try:
+            with journal_path.open(encoding="utf-8") as stream:
+                failed_responses = [json.loads(line) for line in stream if line.strip()]
+        except (OSError, ValueError):
+            failed_responses = list(state["collected"])
         atomic_json(attempt_dir / "attempt_status.json", {
             "recording_id": recording_id, "segment_index": segment_index,
             "valid": False, "error": str(error), "record_start_t": start_t, "record_end_t": end_t,
+            "digital_observation": digital_observation({"record_start_t": start_t,
+                "record_end_t": end_t, "responses": failed_responses}, live_id),
         })
         log(f"  本段未计入有效段，全部文件保留: {error}")
         publish_status("segment_failed", reason=str(error))

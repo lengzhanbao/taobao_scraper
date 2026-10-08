@@ -9,7 +9,7 @@ import sys
 
 def check_file(path, required=True):
     """Check if file exists"""
-    exists = os.path.exists(path)
+    exists = os.path.isfile(path)
     status = "✓" if exists else ("✗" if required else "○")
     req_str = "(required)" if required else "(optional)"
     print(f"  {status} {path} {req_str if not exists and required else ''}")
@@ -24,6 +24,8 @@ def check_dir(path, required=True):
     return exists or not required
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print("=" * 60)
     print("  Taobao Live Scraper - Project Structure Verification")
     print("=" * 60)
@@ -37,6 +39,9 @@ def main():
     all_ok &= check_dir("src/parser")
     all_ok &= check_dir("src/detector")
     all_ok &= check_dir("src/utils")
+    all_ok &= check_dir("src/control")
+    all_ok &= check_dir("src/control/web")
+    all_ok &= check_dir("tests")
     all_ok &= check_dir("scripts")
     all_ok &= check_dir("config")
     all_ok &= check_dir("docs")
@@ -56,6 +61,12 @@ def main():
     all_ok &= check_file("src/utils/__init__.py")
     all_ok &= check_file("src/utils/config.py")
     all_ok &= check_file("src/utils/update_urls.py")
+    for path in ("src/control/__init__.py", "src/control/server.py", "src/control/settings.py",
+                 "src/control/url_lists.py", "src/control/web/index.html", "src/control/web/app.js",
+                 "src/control/web/style.css", "src/utils/segment_evidence.py",
+                 "tests/test_control_simulation.py", "tests/test_control_ui.js",
+                 "tests/test_segment_evidence.py", "tests/test_url_lists.py"):
+        all_ok &= check_file(path)
     
     # Check script files
     print("\n[Script Files]")
@@ -69,6 +80,8 @@ def main():
     all_ok &= check_file("scripts/parse_data.py")
     all_ok &= check_file("scripts/update_urls.py")
     all_ok &= check_file("scripts/collect_digital.py")
+    all_ok &= check_file("scripts/control_panel.py")
+    all_ok &= check_file("scripts/open_control_panel.vbs")
     
     # Check documentation
     print("\n[Documentation]")

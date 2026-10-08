@@ -28,7 +28,8 @@ from src.utils.config import (
     MAX_COLLECTED, SEG_NAMES, USER_AGENT, MAX_ROUND_OVERRIDE, BATCH_ROOMS,
 )
 from pathlib import Path
-from src.utils.safe_io import atomic_json, probe_video, PortLock
+from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
+from src.utils.segment_evidence import validation_matches
 from src.utils.digital_flags import (
     find_values_by_key, parse_json_body,
     summarize_digital_flags, title_keywords_in_values,
@@ -363,6 +364,8 @@ def validation_receipt(room_dir, segment_index):
         try:
             with final_path.open(encoding="utf-8") as stream:
                 final = json.load(stream)
+            if not isinstance(final, dict) or not validation_matches(final):
+                continue
             if int(final.get("segment_index", -1)) != int(segment_index):
                 continue
             video_path = Path(final["recorded_files"][0]).resolve()
@@ -375,6 +378,9 @@ def validation_receipt(room_dir, segment_index):
                 "final_mtime_ns": final_stat.st_mtime_ns, "video_path": str(video_path),
                 "video_size": video_stat.st_size, "video_mtime_ns": video_stat.st_mtime_ns,
                 "video_duration_seconds": float(final["video_duration_seconds"]),
+                "validation_schema_version": 1,
+                "final_sha256": digest(final_path),
+                "video_sha256": final["technical_validation"]["video_sha256"],
             })
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             continue

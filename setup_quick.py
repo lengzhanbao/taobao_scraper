@@ -16,13 +16,15 @@ def print_step(msg):
 def run_command(cmd, check=True):
     """Run shell command"""
     try:
-        result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=isinstance(cmd, str), check=check, capture_output=True, text=True)
         if result.stdout:
             print(result.stdout)
-        return True
-    except subprocess.CalledProcessError as e:
+        if result.returncode and result.stderr:
+            print(result.stderr)
+        return result.returncode == 0
+    except (subprocess.CalledProcessError, OSError) as e:
         print(f"ERROR: {e}")
-        if e.stderr:
+        if getattr(e, 'stderr', None):
             print(e.stderr)
         return False
 
@@ -62,11 +64,11 @@ def check_python():
 def install_dependencies():
     """Install Python dependencies"""
     print("\nInstalling dependencies...")
-    return run_command(f"{sys.executable} -m pip install -r requirements.txt")
+    return run_command([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
 
 def check_ffmpeg():
     """Check FFmpeg availability"""
-    if run_command("ffmpeg -version", check=False):
+    if run_command(["ffmpeg", "-version"], check=False):
         print("✓ FFmpeg found")
         return True
     else:
@@ -77,6 +79,8 @@ def check_ffmpeg():
         return False
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print_step("Taobao Live Scraper - Quick Setup")
     
     # Check Python version
@@ -91,16 +95,17 @@ def main():
     
     # Install dependencies
     print_step("Step 3: Installing dependencies")
-    if not install_dependencies():
+    dependencies_ok = install_dependencies()
+    if not dependencies_ok:
         print("\n⚠ Warning: Some dependencies failed to install")
         print("  You may need to install them manually")
     
     # Check FFmpeg
     print_step("Step 4: Checking FFmpeg")
-    check_ffmpeg()
+    ffmpeg_ok = check_ffmpeg()
     
     # Final instructions
-    print_step("Setup Complete!")
+    print_step("Setup Complete!" if dependencies_ok and ffmpeg_ok else "Setup incomplete: check the errors above")
     print("\nNext steps:")
     print("1. Configure URLs in: 直播研究数据/_config/urls_1.txt ~ urls_5.txt")
     print("2. Login and save cookies:")
@@ -108,6 +113,7 @@ def main():
     print("3. Start all crawlers:")
     print("   powershell -ExecutionPolicy Bypass -File scripts\\start_all_crawlers.ps1")
     print("\nFor more information, see README.md")
+    return 0 if dependencies_ok and ffmpeg_ok else 1
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

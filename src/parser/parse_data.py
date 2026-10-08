@@ -12,6 +12,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT, FFPROBE
 from src.utils.safe_io import atomic_json, verified_copy, probe_video
+from src.utils.segment_evidence import video_validation, digital_observation, file_evidence
 from pathlib import Path
 import uuid
 from src.utils.digital_flags import (
@@ -104,6 +105,28 @@ def write_csv(path, rows, fieldnames, overwrite=False):
         for r in all_rows:
             w.writerow({k: r.get(k, "") for k in fieldnames})
 
+def comment_capture_state(responses, row_count):
+    """An empty captured comment list differs from no capture or parse failure."""
+    if not responses:
+        return {"state": "not_captured", "row_count": row_count}
+    failures = 0
+    for response in responses:
+        parsed = strip_jsonp(response.get("body"))
+        if not isinstance(parsed, dict):
+            failures += 1
+            continue
+        ret = parsed.get("ret", [])
+        if ret and (not isinstance(ret, list) or any(not str(item).startswith("SUCCESS") for item in ret)):
+            failures += 1
+            continue
+        part = parsed.get("data", {})
+        known_list = part.get("comments") if isinstance(part, dict) else None
+        if not isinstance(known_list, list) and not list(walk_find_list(parsed, ["content", "comment", "text"])):
+            failures += 1
+    return {"state": "parse_failed" if failures else "extracted" if row_count else "empty_confirmed",
+            "row_count": row_count, "response_count": len(responses), "failed_response_count": failures}
+
+
 def process_room(room_dir):
     """一个房间所有段 → 1个店铺文件夹 + 1汇总CSV + N弹幕CSV
     步骤: 1)复制JSON到sessions/raw 2)从副本解析"""
@@ -121,13 +144,23 @@ def process_room(room_dir):
         print("  无 _final.json")
         return False
     seen_indexes = set()
+    measured = {}
     for fp in files:
         with open(fp, encoding="utf-8") as stream:
-            index = json.load(stream).get("segment_index")
+            metadata = json.load(stream)
+        index = metadata.get("segment_index")
         if index is not None:
             if index in seen_indexes:
                 raise ValueError(f"重复有效段编号 {index}，保留原文件，需先核对录制进度")
             seen_indexes.add(index)
+        source_files = metadata.get("recorded_files", [])
+        if not isinstance(source_files, list) or len(source_files) != 1:
+            raise ValueError("每段原始 JSON 必须明确对应一个视频；保留源文件待核查")
+        source_video = Path(source_files[0]).resolve()
+        if not source_video.is_relative_to(Path(room_dir).resolve()) or not source_video.is_file():
+            raise ValueError("视频缺失或路径超出本房间，保留原始数据")
+        # Preflight all media before creating archive copies. Never trust wall clock.
+        measured[fp] = video_validation(source_video, metadata, FFPROBE, probe=probe_video)
 
     # —— 从第一个文件提取店铺名 ——
     first = json.load(open(files[0], encoding="utf-8"))
@@ -154,6 +187,7 @@ def process_room(room_dir):
     os.makedirs(raw_dir, exist_ok=True)
     copied = []
     archive_entries = []
+    archive_segments = []
     for fp in files:
         dst = os.path.join(raw_dir, os.path.basename(fp))
         archive_entries.append(verified_copy(fp, dst))
@@ -196,12 +230,8 @@ def process_room(room_dir):
                 elif not live.get(key):
                     live[key] = v
 
-        segment_digital_values = [
-            value
-            for obj in dc_parsed
-            for value in find_values_by_key(obj, "isDigitalAnchorLive")
-        ]
-        segment_flag_summary = summarize_digital_flags(segment_digital_values)
+        observation = digital_observation({**data, "video_duration_seconds": measured[files[fi]]["duration_seconds"]}, live_id)
+        segment_flag_summary = observation["flag_summary"]
 
         _title = live.get("title") or live.get("liveTitle") or ""
         _anchor = live.get("accountName") or live.get("anchorName") or ""
@@ -327,7 +357,9 @@ def process_room(room_dir):
             date_s = f"{d8[:4]}-{d8[4:6]}-{d8[6:]}"
             cap_s = f"{t6[:2]}:{t6[2:4]}:{t6[4:]}"
         except: date_s = cap_s = ""
-        rec_dur = round(data.get("record_end_t", 0) - data.get("record_start_t", 0))
+        rec_dur = measured[files[fi]]["duration_seconds"]
+        comment_state = comment_capture_state(cc, len(uniq_c))
+        recording_id = str(data.get("recording_id") or tag)
         segment_classification = classify_digital_segment(
             segment_flag_summary, title_hits
         )
@@ -337,10 +369,20 @@ def process_room(room_dir):
         row = {
             "段": f"第{fi+1}段",
             "录制编号": tag,
+            "录制唯一ID": recording_id,
+            "原始段号": data.get("segment_index", fi + 1),
             "标题": _title, "主播名": _anchor, "账号ID": live.get("accountId", ""),
             "日期": date_s, "录制时间": cap_s, "总录制时长(秒)": rec_dur,
             "录制开始时间戳": data.get("record_start_t", ""),
             "录制结束时间戳": data.get("record_end_t", ""),
+            "时长核验来源": "ffprobe",
+            "弹幕提取状态": comment_state["state"],
+            "已捕获标记是否全true": "是" if observation["all_true"] is True else
+                                   "否" if observation["all_true"] is False else "未捕获",
+            "标记缺失响应数": observation["missing_flag_response_count"],
+            "标记无法关联响应数": observation["unlinked_response_count"],
+            "录制期间标记检测次数": observation["in_recording_flagged_response_count"],
+            "最大检测空窗(秒)": observation["maximum_observation_gap_seconds"],
             "直播间链接": data.get("live_url", ""),
             "弹幕最早": ctimes[0] if ctimes else "", "弹幕最晚": ctimes[-1] if ctimes else "",
             "弹幕数": len(uniq_c), "弹幕人数": len(set(m["用户"] for m in uniq_c if m["用户"])),
@@ -392,12 +434,22 @@ def process_room(room_dir):
             src = (Path(seg_dir) / src.name).resolve()
         if not src.is_relative_to(Path(room_dir).resolve()) or not src.is_file() or src.stat().st_size == 0:
             raise ValueError("视频缺失或路径超出本房间，保留原始数据")
-        duration = probe_video(src, FFPROBE)
+        duration = measured[files[fi]]["duration_seconds"]
         dst = os.path.join(vid_dir, f"{base_name}_video_第{fi+1}段.flv")
         entry = verified_copy(src, dst)
+        if entry["sha256"] != measured[files[fi]]["video_sha256"]:
+            raise ValueError("视频在时长核验后发生变化，源文件与副本保留待核查")
         entry.update(segment_index=data.get("segment_index", fi + 1),
-                     recording_id=data.get("recording_id", tag), duration_seconds=duration)
+                     recording_id=recording_id, duration_seconds=duration)
         archive_entries.append(entry)
+        archive_segments.append({"recording_id": recording_id,
+                                 "segment_index": data.get("segment_index", fi + 1),
+                                 "raw_json": archive_entries[fi], "video": entry,
+                                 "comments": file_evidence(os.path.join(cra_dir, cn)),
+                                 "comment_extraction": comment_state,
+                                 "duration_seconds": rec_dur,
+                                 "technical_validation": measured[files[fi]],
+                                 "digital_observation": observation})
         print(f"    📹 第{fi+1}段: {duration:.1f}秒，SHA256 校验通过")
 
     # 汇总CSV
@@ -456,7 +508,8 @@ def process_room(room_dir):
     if not rows or not os.path.isfile(sp) or len(archive_entries) != 2 * len(files):
         raise ValueError("归档文件不完整")
     atomic_json(os.path.join(sess_dir, "archive_manifest.json"),
-                {"room_id": live_id, "segment_count": len(files), "entries": archive_entries,
+                {"schema_version": 2, "room_id": live_id, "segment_count": len(files), "entries": archive_entries,
+                 "segments": archive_segments, "summary": file_evidence(sp),
                  "source_preserved": True}, backup=True)
     print(f"  ARCHIVE_COPY_OK: {len(files)} 段，逐文件校验，源文件保留")
     print(f"  文件夹: {pair_str}")

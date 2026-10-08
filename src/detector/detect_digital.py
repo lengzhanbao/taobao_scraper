@@ -114,6 +114,9 @@ def parse_live_response(body, expected_lid):
     result = {}
     title_values = []
     if parsed is not None:
+        ids = {str(value) for value in find_keys(parsed, "liveId") if value is not None}
+        if ids != {str(expected_lid)}:
+            return None
         digital_values = find_keys(parsed, "isDigitalAnchorLive")
         flag_summary = summarize_digital_flags(digital_values)
         result["isDigitalAnchorLive"] = (
@@ -185,6 +188,7 @@ def parse_live_response(body, expected_lid):
         title_keywords_in_values(title_values or [result.get("liveTitle")])
     )
     result["raw_snippet"] = text[:1500]
+    result["bodyParsed"] = parsed is not None
     return result
 
 
@@ -242,6 +246,39 @@ def load_cookies():
     return data if isinstance(data, list) else []
 
 
+def aggregate_detail_responses(responses, live_id):
+    """Summarize the complete captured detection window, never only its first reply."""
+    parsed = [parse_live_response(item.get("body"), str(live_id)) for item in responses]
+    parsed = [item for item in parsed if item is not None]
+    if not parsed:
+        return None
+    result = dict(parsed[0])
+    values = []
+    missing_responses = 0
+    title_matches = set()
+    for item in parsed:
+        flags = item.get("isDigitalAnchorLiveValues", [])
+        if item.get("bodyParsed"):
+            values.extend(flags)
+        if not flags or not item.get("bodyParsed"):
+            missing_responses += 1
+        title_matches.update(item.get("titleRuleOverride", []))
+        for key in ("liveTitle", "anchorName", "liveStatus"):
+            if not result.get(key):
+                result[key] = item.get(key, "")
+    summary = summarize_digital_flags(values)
+    result.update(isDigitalAnchorLive=True if summary["all_true"] else False if summary["all_false"] else None,
+                  isDigitalAnchorLiveValues=["true" if value is True or value == "true" else
+                                            "false" if value is False or value == "false" else "unknown" for value in values],
+                  digitalFlagStatus=summary["status"], platformAllTrue=summary["all_true"],
+                  platformHasFalse=summary["has_false"], platformHasMissing=summary["has_missing"] or bool(missing_responses),
+                  missingFlagResponseCount=missing_responses,
+                  titleRuleOverride=sorted(title_matches), matchedResponseCount=len(parsed),
+                  capturedDetailResponseCount=len(responses),
+                  observationBasis="captured_detection_window_only")
+    return result
+
+
 def check_one(page, live_id):
     url = f"https://tbzb.taobao.com/live?liveId={live_id}"
     page.listen.start("live.detail.get")
@@ -251,12 +288,7 @@ def check_one(page, live_id):
         log(f"  load failed for {live_id}: {exc}")
 
     responses = collect_detail_responses(page, 8)
-    result = None
-    for item in responses:
-        parsed = parse_live_response(item["body"], live_id)
-        if parsed:
-            result = parsed
-            break
+    result = aggregate_detail_responses(responses, live_id)
 
     if result is None:
         try:
@@ -264,11 +296,7 @@ def check_one(page, live_id):
         except Exception:
             pass
         responses.extend(collect_detail_responses(page, 6))
-        for item in responses:
-            parsed = parse_live_response(item["body"], live_id)
-            if parsed:
-                result = parsed
-                break
+        result = aggregate_detail_responses(responses, live_id)
 
     if result is None:
         return {

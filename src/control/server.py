@@ -19,12 +19,14 @@ import uuid
 import webbrowser
 
 from src.control.settings import ROOT, defaults, validate, migrate_settings, read_url_list, build_environment
-from src.utils.safe_io import atomic_json
+from src.utils.safe_io import atomic_json, digest
+from src.utils.segment_evidence import (EvidenceCache, validation_matches, digital_observation,
+                                       observation_counts, inspect_archive)
 from src.crawler.runtime_control import pause_requested
 from src.control.url_lists import inspect as inspect_urls, save_list, correct_count
 
 CONTROL = ROOT / "_control"
-VERSION = "2.5-local-panel"
+VERSION = "2.6-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 
 
@@ -40,7 +42,10 @@ def summarize_rows(rows):
     progress_percent = (round(verified_completed * 100 / target, 1) if target else 0)
     if not known and unknown:
         verified = verified_completed = progress_percent = None
-    return {"rooms": len(rows), "complete": sum(r["count"] >= r["target"] for r in rows),
+    observations = {(row.get("live_id"), key): value for row in rows
+                    for key, value in row.get("digital_observations", {}).items()}
+    return {"digital_markers": observation_counts(observations),
+            "rooms": len(rows), "complete": sum(r["count"] >= r["target"] for r in rows),
             "verified_complete": sum(r.get("valid_count") is not None and
                                      r["valid_count"] >= r["target"] for r in rows),
             "recorded": sum(r["count"] for r in rows), "remaining": target - completed,
@@ -51,7 +56,7 @@ def summarize_rows(rows):
                               "partial" if unknown else "verified"}
 
 
-def verified_progress_records(progress, study_root):
+def verified_progress_records(progress, study_root, observations=None, cache=None):
     """Return receipt identities, historical counts and per-room receipt state."""
     if not isinstance(progress, dict):
         return {}, {}, {}
@@ -60,6 +65,7 @@ def verified_progress_records(progress, study_root):
                   if isinstance(value, dict) and type(value.get("count")) is int}
         return {}, legacy, {}
     staging = (Path(study_root) / "_staging").resolve()
+    cache = cache or EvidenceCache()
     verified = {}
     receipt_states = {}
     raw_legacy = progress.get("legacy_counts", {})
@@ -93,16 +99,27 @@ def verified_progress_records(progress, study_root):
                 if (not isinstance(final, dict)
                         or not isinstance(final.get("recorded_files"), list)):
                     continue
+                if receipt.get("validation_schema_version") != 1 or not final.get("technical_validation"):
+                    receipt_states[live_id] = "unverified"
+                    continue
+                if (not validation_matches(final)
+                        or cache.get(final_path, "sha256", digest) != receipt.get("final_sha256")
+                        or cache.get(video_path, "sha256", digest) != receipt.get("video_sha256")
+                        or receipt.get("video_sha256") != final["technical_validation"]["video_sha256"]):
+                    continue
                 if (str(final.get("recording_id")) != str(receipt["recording_id"])
                         or int(final.get("segment_index", -1)) != int(receipt["segment_index"])
                         or video_path not in [Path(item).resolve() for item in final.get("recorded_files", [])]
                         or float(final.get("video_duration_seconds", 0)) != float(receipt["video_duration_seconds"])):
                     continue
                 identities.add(str(receipt["recording_id"]))
+                if observations is not None:
+                    observations.setdefault(live_id, {})[str(receipt["recording_id"])] = digital_observation(final, live_id)
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
         if receipts:
-            verified[live_id] = identities
+            if identities or receipt_states.get(live_id) != "unverified":
+                verified[live_id] = identities
             if identities:
                 receipt_states[live_id] = "verified"
     return verified, legacy if isinstance(legacy, dict) else {}, receipt_states
@@ -113,36 +130,27 @@ def verified_progress_counts(progress, study_root):
     return {live_id: len(items) for live_id, items in records.items()}, legacy
 
 
-def archived_segment_records(study_root):
-    """Return unique verified recording IDs copied into preserved archive sessions."""
+def archived_segment_records(study_root, ffprobe=None, observations=None, diagnostics=None, cache=None):
+    """Count only complete JSON/video/comments/summary sets with actual media duration."""
+    if ffprobe is None:
+        from src.utils.config import FFPROBE
+        ffprobe = FFPROBE
     sessions = (Path(study_root) / "sessions").resolve()
     recordings_by_room = {}
     if not sessions.is_dir():
         return recordings_by_room
     for manifest_path in sessions.glob("*/archive_manifest.json"):
         try:
-            with manifest_path.open(encoding="utf-8") as stream:
-                manifest = json.load(stream)
-            if not isinstance(manifest, dict):
-                continue
-            if manifest.get("source_preserved") is not True:
-                continue
-            live_id = str(manifest["room_id"])
-            recordings = recordings_by_room.setdefault(live_id, set())
-            entries = manifest.get("entries", [])
-            if not isinstance(entries, list):
-                continue
-            for item in entries:
-                if not isinstance(item, dict):
-                    continue
-                recording_id = str(item.get("recording_id", ""))
-                destination = Path(item["destination"]).resolve()
-                if (not recording_id or not destination.is_relative_to(sessions)
-                        or not destination.is_file() or destination.stat().st_size != item.get("bytes")):
-                    continue
-                recordings.add(recording_id)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-            continue
+            live_id, records, flags, issues = inspect_archive(manifest_path, ffprobe, cache)
+            recordings_by_room.setdefault(live_id, set()).update(records)
+            if observations is not None:
+                observations.setdefault(live_id, {}).update(flags)
+            if diagnostics is not None:
+                diagnostics.setdefault(live_id, []).extend(issues)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            if diagnostics is not None:
+                live_id = manifest_path.parent.name.rsplit("_", 1)[-1]
+                diagnostics.setdefault(live_id, []).append("归档清单无法核验：" + str(error))
     return recordings_by_room
 
 
@@ -288,6 +296,7 @@ class Manager:
         self.run = load_json(self.control / "active_run.json", {})
         self.check_cache = None
         self._archive_cache = ("", 0, {})
+        self.evidence_cache = EvidenceCache()
 
     def save(self, config):
         with self.lock:
@@ -344,7 +353,8 @@ class Manager:
             progress = load_json(Path(self.settings['study_root']) / '_control' /
                                  f"progress_{self.settings['instances'][instance_id - 1]['port']}.json", {})
             receipt_records, _, _ = verified_progress_records(progress, self.settings['study_root'])
-            archive_ids = archived_segment_records(self.settings['study_root']).get(live_id, set())
+            archive_ids = archived_segment_records(self.settings['study_root'], self.settings['ffprobe'],
+                                                  cache=self.evidence_cache).get(live_id, set())
             evidence_floor = len(receipt_records.get(live_id, set()) | archive_ids)
             if count < evidence_floor:
                 raise ValueError(f'更正值不能低于已核验的 {evidence_floor} 段')
@@ -391,8 +401,11 @@ class Manager:
         rows = read_url_list(source, instance["segments"])
         progress = load_json(Path(config["study_root"]) / "_control" /
                              f"progress_{instance['port']}.json", {})
-        valid_records, legacy_counts, receipt_states = verified_progress_records(progress, config["study_root"])
-        archive_records = self.archive_records(config["study_root"])
+        observations = {}
+        valid_records, legacy_counts, receipt_states = verified_progress_records(
+            progress, config["study_root"], observations, self.evidence_cache)
+        archive_bundle = self.archive_bundle(config["study_root"], config["ffprobe"])
+        archive_records = archive_bundle["records"]
         corrections = read_count_corrections(config["study_root"]) if snapshot is None else {}
         for row in rows:
             live_id = row["live_id"]
@@ -412,8 +425,14 @@ class Manager:
                                    len(archive_ids))
             else:
                 row["count"] = max(row["count"], legacy_counts.get(live_id, 0), saved_count)
-            row["valid_count"] = len(all_valid_ids) if all_valid_ids or live_id in receipt_states else None
+            row["valid_count"] = (len(all_valid_ids) if all_valid_ids or
+                                  receipt_states.get(live_id) == "invalid" else None)
+            row["valid_record_ids"] = sorted(all_valid_ids)
             row["archived_count"] = len(archive_ids)
+            row["digital_observations"] = {**archive_bundle["observations"].get(live_id, {}),
+                                            **observations.get(live_id, {})}
+            row["digital_markers"] = observation_counts(row["digital_observations"])
+            row["archive_issues"] = archive_bundle["issues"].get(live_id, [])
             if row["valid_count"] is None:
                 row['validation_state'] = '未核验'
             elif row["valid_count"] == 0 and receipt_states.get(live_id) == 'invalid':
@@ -425,13 +444,18 @@ class Manager:
         return rows
 
     def archive_records(self, study_root):
+        return self.archive_bundle(study_root, self.settings["ffprobe"])["records"]
+
+    def archive_bundle(self, study_root, ffprobe):
         now = time.monotonic()
-        root = str(Path(study_root).resolve())
+        root = str(Path(study_root).resolve()) + "|" + str(ffprobe)
         if self._archive_cache[0] == root and now - self._archive_cache[1] < 30:
             return self._archive_cache[2]
-        records = archived_segment_records(study_root)
-        self._archive_cache = (root, now, records)
-        return records
+        observations, issues = {}, {}
+        records = archived_segment_records(study_root, ffprobe, observations, issues, self.evidence_cache)
+        bundle = {"records": records, "observations": observations, "issues": issues}
+        self._archive_cache = (root, now, bundle)
+        return bundle
 
     def archive_counts(self, study_root):
         return {live_id: len(records) for live_id, records in self.archive_records(study_root).items()}
@@ -606,12 +630,14 @@ class Manager:
                                                                    "valid_count": None, "archived_count": 0})
                         previous_valid = previous["valid_count"]
                         row_valid = row["valid_count"]
+                        merged_ids = set(previous.get("valid_record_ids", [])) | set(row["valid_record_ids"])
                         distinct[row["live_id"]] = {
                             "count": max(previous["count"], row["count"]),
                             "target": max(previous["target"], row["target"]),
-                            "valid_count": (max(previous_valid, row_valid)
-                                            if previous_valid is not None and row_valid is not None
-                                            else previous_valid if row_valid is None else row_valid),
+                            "valid_count": len(merged_ids) if previous_valid is not None or row_valid is not None else None,
+                            "valid_record_ids": sorted(merged_ids),
+                            "digital_observations": {**previous.get("digital_observations", {}),
+                                                     **row["digital_observations"]},
                             "archived_count": max(previous["archived_count"], row["archived_count"]),
                         }
             totals["rooms"] = len(distinct)
@@ -623,6 +649,8 @@ class Manager:
             totals["recorded_segments"] = sum(r["count"] for r in distinct.values())
             totals["valid_segments"] = sum(known_counts) if known_counts or not unverified_rooms else None
             totals["archived_segments"] = sum(r["archived_count"] for r in distinct.values())
+            totals["digital_markers"] = observation_counts({(lid, key): value
+                for lid, row in distinct.items() for key, value in row["digital_observations"].items()})
             totals["remaining_segments"] = sum(max(0, r["target"] - r["count"]) for r in distinct.values())
             totals["target_segments"] = sum(r["target"] for r in distinct.values())
             completed_valid = sum(min(r["valid_count"], r["target"]) for r in distinct.values()

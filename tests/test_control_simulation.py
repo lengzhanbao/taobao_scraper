@@ -26,7 +26,8 @@ from src.control.settings import defaults, validate, build_environment, read_url
 from src.control.server import (Manager, handler_for, process_birth, verified_progress_counts,
                                 verified_progress_records, archived_segment_counts,
                                 compatible_existing_service)
-from src.utils.safe_io import atomic_json, verified_copy, PortLock
+from src.utils.safe_io import atomic_json, verified_copy, PortLock, digest
+from src.utils.segment_evidence import video_validation, validation_matches
 from src.crawler.recording import record_segment
 from src.crawler.runtime_control import pause_requested, wait_while_paused
 from src.parser import parse_data
@@ -181,9 +182,9 @@ class Checks(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
-    def make_room(self, root, lid, flag=True):
+    def make_room(self, root, lid, flag=True, segments=(1, 2, 3)):
         room = root / f"room_{lid}"
-        for index in (1, 2, 3):
+        for index in segments:
             segment = room / f"segment_{index}"
             segment.mkdir(parents=True)
             video = segment / "video.flv"
@@ -326,12 +327,10 @@ class Checks(unittest.TestCase):
         config = self.config(folder)
         source = Path(config["study_root"]) / "_config" / "urls_1.txt"
         source.write_text("https://tbzb.taobao.com/live?liveId=123,已录制1/3\n", encoding="utf-8")
-        archive_video = Path(config["study_root"]) / "sessions" / "synthetic" / "video.flv"
-        archive_video.parent.mkdir(parents=True)
-        archive_video.write_bytes(b"synthetic archived evidence")
-        atomic_json(archive_video.parent / "archive_manifest.json", {"room_id": "123",
-            "source_preserved": True, "entries": [{"recording_id": "rec-archive",
-                "destination": str(archive_video.resolve()), "bytes": archive_video.stat().st_size}]})
+        room = self.make_room(Path(config["study_root"]) / "_staging" / "browser_9223", 123, segments=(1,))
+        with patch.object(parse_data, "SESSIONS", str(Path(config["study_root"]) / "sessions")), \
+                patch.object(parse_data, "probe_video", return_value=600), contextlib.redirect_stdout(io.StringIO()):
+            parse_data.process_room(str(room))
         manager = Manager(config, control=folder / "control")
         snapshot = None
 
@@ -340,7 +339,8 @@ class Checks(unittest.TestCase):
 
         with patch.object(manager, "preflight", return_value={"ok": True}), \
                 patch("src.control.server.subprocess.Popen", return_value=Child()), \
-                patch("src.control.server.process_birth", return_value="fake-birth"):
+                patch("src.control.server.process_birth", return_value="fake-birth"), \
+                patch("src.utils.segment_evidence.probe_video", return_value=600):
             run = manager.start()
             snapshot = Path(run["jobs"][0]["urls_file"])
             original_snapshot = snapshot.read_bytes()
@@ -480,7 +480,10 @@ class Checks(unittest.TestCase):
         video.write_bytes(b'synthetic video')
         final_path = staging / 'segment_final.json'
         final_payload = {'recording_id': 'rec-1', 'segment_index': 1,
-                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 60.0}
+                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 60.0,
+                         'max_minutes': 1,
+                         'technical_validation': video_validation(video, {'max_minutes': 1}, 'synthetic',
+                                                                   probe=lambda *_: 60.0)}
         final_path.write_text(json.dumps(final_payload), encoding='utf-8')
         final_stat, video_stat = final_path.stat(), video.stat()
         progress = {'schema_version': 2, 'legacy_counts': {'123': 3}, 'rooms': {'123': {
@@ -488,7 +491,8 @@ class Checks(unittest.TestCase):
                 'final_json': str(final_path.resolve()), 'final_size': final_stat.st_size,
                 'final_mtime_ns': final_stat.st_mtime_ns, 'video_path': str(video.resolve()),
                 'video_size': video_stat.st_size, 'video_mtime_ns': video_stat.st_mtime_ns,
-                'video_duration_seconds': 60.0}]}}}
+                'video_duration_seconds': 60.0, 'validation_schema_version': 1,
+                'final_sha256': digest(final_path), 'video_sha256': digest(video)}]}}}
         valid, legacy = verified_progress_counts(progress, study)
         self.assertEqual(valid, {'123': 1})
         self.assertEqual(legacy, {'123': 3})
@@ -519,7 +523,7 @@ class Checks(unittest.TestCase):
                 {'recording_id': 'missing', 'destination': str((sessions / 'absent.flv').resolve()), 'bytes': 4},
             ]}
             (archived_video.parent / 'archive_manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
-        self.assertEqual(archived_segment_counts(study), {'123': 1})
+        self.assertEqual(archived_segment_counts(study), {'123': 0})
 
     def test_16_crawler_validation_receipt_links_final_and_video(self):
         folder = self.folder('receipt_builder')
@@ -530,11 +534,13 @@ class Checks(unittest.TestCase):
         video.write_bytes(b'synthetic')
         final = segment / 'capture_final.json'
         final.write_text(json.dumps({'recording_id': 'rec-123', 'segment_index': 1,
-                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 42.5}), encoding='utf-8')
+                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 60.0,
+                         'max_minutes': 1, 'technical_validation': video_validation(video, {'max_minutes': 1},
+                             'synthetic', probe=lambda *_: 60.0)}), encoding='utf-8')
         tree = ast.parse((ROOT / 'src' / 'crawler' / 'taobao_crawler.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                         and node.name == 'validation_receipt')
-        namespace = {'Path': Path, 'json': json}
+        namespace = {'Path': Path, 'json': json, 'digest': digest, 'validation_matches': validation_matches}
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'synthetic_receipt_builder', 'exec'), namespace)
         receipt = namespace['validation_receipt'](room, 1)
         self.assertEqual(receipt['recording_id'], 'rec-123')
