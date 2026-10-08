@@ -40,6 +40,7 @@ const context=vm.createContext({console,setInterval(){},document:{
 },fetch:async(route,options)=>{
   requests.push({route,options});
   if(route==="/api/state")return {ok:true,json:async()=>fixture};
+  if(route.startsWith('/api/urls'))return {ok:true,json:async()=>({instance_id:1,path:'synthetic/urls_1.txt',revision:'abc',active_text:'https://tbzb.taobao.com/live?liveId=123',rows:[{live_id:'123',count:1,target:3}],message:'saved'})};
   return {ok:true,json:async()=>({message:"synthetic action accepted"})};
 }});
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/control/web/app.js"),"utf8"),context);
@@ -69,6 +70,31 @@ async function main() {
   await vm.runInContext("refresh()",context);
   assert.equal(elements.get("total-progress").value,0);
   assert.equal(vm.runInContext("percent(7,3)",context),100);
+  fixture.version='2.3-local-panel';
+  await vm.runInContext("refresh()",context);
+  elements.get('url-instance').value='1';
+  elements.get('url-load').listeners.click();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(elements.get('url-text').value,'https://tbzb.taobao.com/live?liveId=123');
+  assert.equal(elements.get('url-rows').children.length,1);
+  elements.get('url-text').value='123\n456';
+  elements.get('url-text').listeners.input();
+  elements.get('url-save').listeners.click();
+  await new Promise(resolve=>setImmediate(resolve));
+  const save=requests.find(request=>request.route==='/api/urls'&&request.options.method==='POST');
+  assert.equal(JSON.parse(save.options.body).revision,'abc');
+  assert.equal(JSON.parse(save.options.body).text,'123\n456');
+  elements.get('url-text').listeners.input();
+  elements.get('url-instance').value='2';
+  elements.get('url-instance').listeners.change();
+  assert.equal(elements.get('url-instance').value,'1');
+  assert.match(elements.get('message').textContent,/保存当前网址草稿/);
+  elements.get('preset-short').listeners.click();
+  assert.equal(elements.get('max-minutes').value,1);
+  assert.equal(elements.get('batch-rooms').value,1);
+  fixture.version='2.1-local-panel';
+  await vm.runInContext('refresh()',context);
+  assert.equal(elements.get('url-save').disabled,true);
   console.log("Dashboard checks passed: total/instance/time progress, targeted pause/resume, legacy task, empty plan.");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

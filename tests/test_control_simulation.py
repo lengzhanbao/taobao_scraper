@@ -148,6 +148,19 @@ class Checks(unittest.TestCase):
                                  headers={"Origin": origin, "X-Control-Token": "synthetic-token"})
             with urlopen(legitimate, timeout=5) as response:
                 self.assertEqual(response.status, 200)
+            with urlopen(origin + '/api/urls?instance=1', timeout=5) as response:
+                document = json.load(response)
+            request = Request(origin + '/api/urls', json.dumps({'instance_id': 1, 'text': '987654321',
+                              'revision': document['revision'], 'mode': 'append'}).encode(),
+                              headers={'Origin': origin, 'X-Control-Token': 'synthetic-token'})
+            with urlopen(request, timeout=5) as response:
+                saved = json.load(response)
+                self.assertIn('987654321', [row['live_id'] for row in saved['rows']])
+            malicious_urls = Request(origin + '/api/urls', b'{}', headers={'Origin': 'http://external.test',
+                                     'X-Control-Token': 'synthetic-token'})
+            with self.assertRaises(HTTPError) as error:
+                urlopen(malicious_urls, timeout=5)
+            self.assertEqual(error.exception.code, 403)
             with patch.object(manager, "set_paused", return_value={"paused": True}) as pause:
                 for route, expected in (("pause", True), ("resume", False)):
                     request = Request(origin + "/api/" + route, b'{"instance_id":2}',

@@ -4,6 +4,8 @@ let token = "";
 let dirty = false;
 let busy = false;
 let legacyNoticeShown = false;
+let urlDocument = null;
+let urlDirty = false;
 const $ = id => document.getElementById(id);
 const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
 function message(text, error=false) { $("message").hidden=false; $("message").textContent=text; $("message").classList.toggle("error",error); }
@@ -92,13 +94,29 @@ async function refresh() {
   $("run-detail").textContent=alive?"修改设置将在下次启动时生效":"保存设置后即可启动";
   $("code-root").textContent="版本目录："+state.code_root;
   $("version").textContent="v"+state.version.split("-")[0];
+  const urlSupported=Number(state.version.split("-")[0])>=2.3;
+  $("url-load").disabled=!urlSupported||busy;
+  $("url-reload").disabled=!urlSupported||busy;
+  $("url-save").disabled=!urlSupported||busy||!urlDocument;
+  $("url-append").disabled=!urlSupported||busy||!urlDocument;
+  if(!urlSupported) $("url-note").textContent="运行中的控制台是旧版，重启控制台后即可在此管理网址。";
   if(state.version==="2.1-local-panel"&&!legacyNoticeShown) {legacyNoticeShown=true;message("更新已写入。新归档阈值和暂停功能需要重启控制台，并在下一次启动采集时生效。");}
 }
 async function logRefresh() { const result=await api("/api/log?instance="+$("log-instance").value);$("log-content").textContent=result.text; }
 function changed() { dirty=true;$("save-note").textContent="有未保存修改"; }
-document.addEventListener("input",event=>{if(event.target.matches("input"))changed();});
-document.addEventListener("change",event=>{if(event.target.matches("input"))changed();});
-async function action(fn) { if(busy)return;busy=true;$("start").disabled=true;try{await fn();}catch(error){message(error.message,true);}finally{busy=false;try{await refresh();}catch{}} }
+function settingsInput(event) {if(event.target.matches("input")&&(event.target.closest("#settings-form")||/^(enabled|segments)-/.test(event.target.id)))changed();}
+document.addEventListener("input",settingsInput);
+document.addEventListener("change",settingsInput);
+async function action(fn) {
+  if(busy)return;busy=true;$("start").disabled=true;
+  const controls=["url-instance","url-text","url-add-text","url-import","url-load","url-save","url-append","url-reload"];
+  for(const id of controls)$(id).disabled=true;
+  try{await fn();}catch(error){message(error.message,true);}finally{
+    busy=false;for(const id of controls)$(id).disabled=false;
+    $("url-save").disabled=!urlDocument;$("url-append").disabled=!urlDocument;
+    try{await refresh();}catch{}
+  }
+}
 $("settings-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{await api("/api/settings",settingsFromForm());dirty=false;$("save-note").textContent="已保存";message("设置已保存。运行中的实例沿用本次启动快照。");});});
 $("check").addEventListener("click",()=>action(async()=>{if(dirty)throw new Error("先保存当前设置，再检查环境。");const result=await api("/api/check",{});renderChecks(result);message(result.ok?"环境检查通过，可以启动采集。":"有启动条件未满足，请查看环境检查。",!result.ok);}));
 $("start").addEventListener("click",()=>action(async()=>{if(dirty)throw new Error("请先保存当前设置。");await api("/api/start",{});message("采集已启动。无需保持页面或命令行窗口打开。");}));
@@ -109,3 +127,58 @@ $("log-instance").addEventListener("change",()=>logRefresh().catch(e=>message(e.
 refresh().catch(e=>message("无法连接控制台："+e.message,true));
 setInterval(()=>{if(!busy)refresh().catch(()=>{});},5000);
 setInterval(()=>{if(!busy)logRefresh().catch(()=>{});},7000);
+
+function showUrlDocument(result) {
+  urlDocument=result;urlDirty=false;
+  $("url-text").value=result.active_text;
+  $("url-path").textContent=result.path;
+  $("url-note").textContent="已加载 · 保存会保留原文件备份";
+  $("url-count").textContent=result.rows.length+" 间";
+  $("url-rows").replaceChildren();
+  for(const row of result.rows) {const tr=document.createElement("tr");tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.count>=row.target?"已满段":"待录制"));$("url-rows").append(tr);}
+  const elsewhere=new Map();
+  // Cross-instance duplicates are also checked authoritatively before starting.
+  for(const i of state.instances) if(i.id!==result.instance_id&&i.rooms)elsewhere.set(i.id,i.rooms);
+  if(elsewhere.size) $("url-note").textContent+="；跨实例重复链接会在启动检查中提示";
+}
+$("url-text").addEventListener("input",()=>{urlDirty=true;$("url-note").textContent="网址草稿未保存";});
+$("url-instance").addEventListener("change",()=>{
+  if((urlDirty||$("url-add-text").value.trim())&&urlDocument) {$("url-instance").value=String(urlDocument.instance_id);message("先保存当前网址草稿或添加追加区网址，再切换实例。",true);return;}
+  urlDocument=null;$("url-text").value="";$("url-path").textContent="点击加载清单";$("url-rows").replaceChildren();$("url-count").textContent="未加载";$("url-save").disabled=true;$("url-append").disabled=true;
+});
+$("url-load").addEventListener("click",()=>action(async()=>{
+  if(dirty)throw new Error("先保存录制设置，再加载对应数据目录的网址。");
+  if(urlDirty)throw new Error("请先保存网址草稿；如需放弃草稿，点击“恢复已保存清单”。");
+  showUrlDocument(await api("/api/urls?instance="+$("url-instance").value));
+}));
+$("url-reload").addEventListener("click",()=>{
+  if(urlDirty&&!window.confirm("放弃页面未保存的网址草稿，并重新加载？已保存的文件不会修改。"))return;
+  action(async()=>{if(dirty)throw new Error("先保存录制设置，再加载网址。");showUrlDocument(await api("/api/urls?instance="+$("url-instance").value));});
+});
+async function saveUrls(mode) {
+  if(dirty)throw new Error("先保存录制设置，再修改网址清单。");
+  if(!urlDocument)throw new Error("请先加载这个实例的清单。");
+  if(mode==="append"&&urlDirty)throw new Error("请先保存编辑区的草稿，再追加新网址。");
+  const text=$(mode==="append"?"url-add-text":"url-text").value;
+  if(mode==="append"&&!text.trim())throw new Error("请先粘贴要添加的网址。");
+  const result=await api("/api/urls",{instance_id:urlDocument.instance_id,revision:urlDocument.revision,text,mode});
+  showUrlDocument(result);
+  if(mode==="append")$("url-add-text").value="";
+  message(result.message+(result.backup?" 备份："+result.backup:""));
+}
+$("url-save").addEventListener("click",()=>action(()=>saveUrls("replace")));
+$("url-append").addEventListener("click",()=>action(()=>saveUrls("append")));
+$("url-import").addEventListener("change",event=>{
+  const file=event.target.files[0];
+  action(async()=>{try{if(!urlDocument)throw new Error("请先加载一个实例的清单，再导入 TXT。");if(!file)return;if(file.size>48000)throw new Error("TXT 最多 48 KB，请分批导入。");const text=await file.text();$("url-add-text").value=text.replace(/^\uFEFF/,"");message("已导入到追加区。点击“添加到这个实例”后保存，不会覆盖编辑区草稿。");}finally{event.target.value="";}});
+});
+$("url-export").addEventListener("click",()=>{
+  const blob=new Blob([$("url-text").value],{type:"text/plain;charset=utf-8"});const link=document.createElement("a");const objectUrl=URL.createObjectURL(blob);link.href=objectUrl;link.download="urls_"+$("url-instance").value+"_draft.txt";link.click();URL.revokeObjectURL(objectUrl);
+});
+function preset(short) {
+  $("max-minutes").value=short?1:20;$("cooldown").value=120;$("batch-rooms").value=short?1:6;$("launch-gap").value=short?0:45;
+  for(const i of state.instances)$("segments-"+i.id).value=short?1:(i.id===4?4:3);
+  changed();message("配置已填入，检查实例开关后保存；不会自动启动采集。");
+}
+$("preset-study").addEventListener("click",()=>{if(state&&!busy)preset(false);});
+$("preset-short").addEventListener("click",()=>{if(state&&!busy)preset(true);});

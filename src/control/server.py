@@ -21,9 +21,10 @@ import webbrowser
 from src.control.settings import ROOT, defaults, validate, read_url_list, build_environment
 from src.utils.safe_io import atomic_json
 from src.crawler.runtime_control import pause_requested
+from src.control.url_lists import inspect as inspect_urls, save_list
 
 CONTROL = ROOT / "_control"
-VERSION = "2.2-local-panel"
+VERSION = "2.3-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 
 
@@ -119,6 +120,31 @@ class Manager:
             atomic_json(self.settings_path, self.settings, backup=True)
             self.check_cache = None
             return self.settings
+
+    def url_document(self, instance_id):
+        if type(instance_id) is not int or not 1 <= instance_id <= 5:
+            raise ValueError('实例编号必须是 1—5')
+        with self.lock:
+            instance = self.settings['instances'][instance_id - 1]
+            path = Path(self.settings['study_root']) / '_config' / instance['urls_file']
+            result = inspect_urls(path, instance['segments'])
+            result['rows'] = self.url_rows(instance)
+            result['instance_id'] = instance_id
+            result['active_text'] = '\n'.join(line for line in result['text'].splitlines()
+                                            if line.strip() and not line.lstrip().startswith('#'))
+            result['running'] = any(job['alive'] for job in self.jobs())
+            return result
+
+    def save_urls(self, body):
+        with self.lock:
+            document = self.url_document(body.get('instance_id'))
+            saved = save_list(document['path'], document['target'], body.get('text'),
+                              body.get('revision'), body.get('mode', 'replace'))
+            self.check_cache = None
+            result = self.url_document(document['instance_id'])
+            result['backup'] = saved['backup']
+            result['message'] = '网址清单已保存；正在运行的任务使用启动时的清单，新清单下次启动生效。'
+            return result
 
     def url_rows(self, instance, config=None, snapshot=None):
         config = config or self.settings
@@ -348,6 +374,8 @@ def handler_for(manager, token, expected_origin):
                     return self.reply(200, state)
                 if url.path == "/api/log":
                     return self.reply(200, {"text": manager.log_tail(int(parse_qs(url.query).get("instance", [1])[0]))})
+                if url.path == "/api/urls":
+                    return self.reply(200, manager.url_document(int(parse_qs(url.query).get('instance', [1])[0])))
                 static = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}
                 if url.path in static:
                     path = ROOT / "src" / "control" / "web" / static[url.path]
@@ -373,6 +401,7 @@ def handler_for(manager, token, expected_origin):
                            "/api/stop": manager.stop}
                 actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True)
                 actions["/api/resume"] = lambda: manager.set_paused(body.get("instance_id"), False)
+                actions['/api/urls'] = lambda: manager.save_urls(body)
                 if self.path not in actions:
                     return self.reply(404, {"error": "操作不存在"})
                 return self.reply(200, actions[self.path]())

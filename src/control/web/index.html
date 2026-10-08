@@ -10,6 +10,7 @@
     <div class="brand"><span class="brandmark">播</span><div>直播研究<span class="subbrand">TAOBAO LIVE LAB</span></div></div>
     <div class="nav-label">工作空间</div>
     <a class="nav active" href="#overview">◈ <span>采集控制台</span></a>
+    <a class="nav" href="#urls">↗ <span>直播网址管理</span></a>
     <a class="nav" href="#settings">⚙ <span>录制设置</span></a>
     <a class="nav" href="#instances">▤ <span>实例与进度</span></a>
     <a class="nav" href="#logs">≡ <span>运行日志</span></a>
@@ -27,15 +28,28 @@
       <article><span>待录制段数</span><strong id="remaining">—</strong><small>按当前设置计算</small></article>
     </section>
     <section class="collection-progress" aria-label="整体录制进度"><div><strong>整体录制进度</strong><span id="total-progress-text">读取中</span></div><progress id="total-progress" max="100" value="0" aria-label="已完成目标段数百分比"></progress><small>成功录制并通过视频校验的段落才增加进度；旧清单计数沿用原记录。</small></section>
+    <section class="workflow" aria-label="操作步骤"><a href="#urls"><b>1</b> 添加直播网址</a><a href="#settings"><b>2</b> 设置录制节奏</a><a href="#environment"><b>3</b> 检查并启动</a><a href="#instances"><b>4</b> 查看进度 / 暂停</a></section>
+    <section class="card" id="urls">
+      <div class="card-header"><div><h2>直播网址管理</h2><p>直接编辑 urls.txt 清单；每个实例有独立清单，不需要打开文件夹。</p></div><span class="tag">自动去重 · 保存前备份</span></div>
+      <div class="url-workspace">
+        <div class="url-toolbar"><label for="url-instance">分配给实例</label><select id="url-instance"><option value="1">Edge 1</option><option value="2">Edge 2</option><option value="3">Edge 3</option><option value="4">Edge 4</option><option value="5">Edge 5</option></select><button id="url-load">加载清单</button><label class="file-button">导入 TXT<input id="url-import" type="file" accept=".txt,text/plain"></label><button id="url-export">导出当前草稿</button><button id="url-reload">恢复已保存清单</button></div>
+        <p id="url-path" class="file-path">加载后显示网址文件位置</p>
+        <div class="url-editor-grid"><div><label for="url-text">采集清单 · 每行一个淘宝直播链接或直播 ID</label><textarea id="url-text" rows="10" spellcheck="false" placeholder="https://tbzb.taobao.com/live?liveId=123456789&#10;也可以粘贴旧清单，已录制计数会保留。"></textarea><div class="editor-footer"><span id="url-note" role="status">先加载对应实例的清单</span><button id="url-save" class="primary" disabled>保存清单</button></div></div>
+          <div class="url-add"><h3>批量追加网址</h3><p>追加到已保存清单；同一直播 ID 自动合并，不重置已录制段数。</p><textarea id="url-add-text" rows="5" spellcheck="false" aria-label="追加网址" placeholder="把新网址粘贴到这里，每行一个"></textarea><button id="url-append" disabled>添加到这个实例</button><p class="hint">编辑清单时移出的行会保留为停用历史；原文件另有完整备份。运行期间保存，下一次启动生效。</p></div></div>
+        <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>已录制 / 目标</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
+      </div>
+    </section>
     <div class="workspace-grid">
       <section class="card" id="settings"><div class="card-header"><div><h2>录制设置</h2><p>每次启动保存一份参数快照</p></div><span class="tag">数字人采集</span></div>
         <form id="settings-form">
+          <div class="presets"><span>快速填入</span><button type="button" id="preset-study">研究常用配置</button><button type="button" id="preset-short">短录配置 · 1 分钟</button></div>
           <div class="form-grid">
             <label>每段时长上限<div class="input-unit"><input id="max-minutes" type="number" min="1" max="120" required><span>分钟</span></div></label>
             <label>同一直播间冷却<div class="input-unit"><input id="cooldown" type="number" min="1" max="1440" required><span>分钟</span></div></label>
             <label>满段房间批量归档<div class="input-unit"><input id="batch-rooms" type="number" min="1" step="1" required><span>间 / 实例</span></div></label>
             <label>实例启动间隔<div class="input-unit"><input id="launch-gap" type="number" min="0" max="300" required><span>秒</span></div></label>
           </div>
+          <p class="hint">每房间段数和实例开关在下方设置。归档间数接受任意正整数；录制时长是上限，实际时长与直播状态有关。</p>
           <label class="path-label">数据保存位置<input id="study-root" required></label>
           <details><summary>运行环境路径 <span>Python / Edge / FFmpeg</span></summary><div class="advanced">
             <label>Python 解释器<input id="python" required></label><label>Edge 浏览器<input id="edge" required></label>
@@ -56,7 +70,7 @@
     </section>
     <section class="card" id="environment"><div class="card-header"><div><h2>环境检查</h2><p>启动前自动检查依赖、磁盘空间、链接和端口。</p></div><span id="check-time" class="small muted-text">尚未检查</span></div><div id="checks" class="checks-empty">点击上方“检查环境”查看结果。</div></section>
     <section class="card" id="logs"><div class="card-header"><div><h2>运行日志</h2><p>仅显示由这个控制台启动的任务</p></div><div class="log-actions"><label for="log-instance">实例</label><select id="log-instance"><option value="1">Edge 1</option><option value="2">Edge 2</option><option value="3">Edge 3</option><option value="4">Edge 4</option><option value="5">Edge 5</option></select><button id="refresh-log">刷新</button></div></div><pre id="log-content">暂无本次运行日志。</pre></section>
-    <footer><span>关闭页面不影响采集进程</span><span id="code-root"></span></footer>
+    <footer><span>关闭页面不影响采集进程 · 页面每 5 秒刷新状态</span><span id="code-root"></span></footer>
   </main>
 </body>
 </html>
