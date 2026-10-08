@@ -16,7 +16,7 @@
 
 ### 核心功能
 
-新增 **2.1 本地采集控制台**：双击 `scripts/open_control_panel.vbs`，在网页中设置段数、每段时长上限、冷却、批量归档，查看环境、进度和日志。详见 [控制台使用说明](docs/control-panel.md)。
+**本地采集控制台（2.6）**：在本机网页管理最多 5 个 Edge 采集实例、直播网址清单、录制节奏、进度、环境检查和运行日志。控制台仅监听本机回环地址；只有点击“启动采集”后才启动采集任务。详见 [控制台使用说明](docs/control-panel.md)。
 
 ✅ **多实例并行录制** - 5个独立浏览器实例，同时监控不同直播间  
 ✅ **智能数字人检测** - 自动识别数字人主播直播间  
@@ -31,6 +31,30 @@
 - 📈 直播带货效果监测
 - 💼 竞品直播策略分析
 - 🎓 学术研究数据采集
+
+---
+
+### 控制台 2.6：快速启动与计数说明
+
+**前置条件：** Python 3.9 或更高版本；安装 `requirements.txt` 中依赖（采集器需要 `DrissionPage`）；已安装 Edge、FFmpeg 和 FFprobe。控制台本身使用 Python 标准库提供本机网页服务，不依赖网页框架。首次打开后，在“录制设置”中配置数据目录及 Python、Edge、FFmpeg、FFprobe 路径，保存设置并通过“检查环境”后，再按需点击“启动采集”。
+
+Windows 可双击 `scripts/open_control_panel.vbs`（默认调用 `pythonw.exe`），或在项目目录运行：
+
+```powershell
+python -m pip install -r requirements.txt
+python -B scripts/control_panel.py --open
+```
+
+页面地址为 `http://127.0.0.1:8765`。Linux/macOS 可使用同一 Python 命令启动控制台；采集环境路径需在页面中配置。没有 Cookie 时，可在启动后的 Edge 窗口登录。
+
+| 页面指标 | 含义 |
+|---|---|
+| 历史计数 | URL 清单或历史进度中的累计数，用于续录位置；不代表旧视频已重新验证。 |
+| 技术有效段 | 有 FFprobe 实测时长及匹配文件凭据的录制段；全无凭据时显示“未核验”，部分已核验时只汇总有证据部分并标注“至少”。 |
+| 完整归档段 | 归档清单中成套核验通过的段，依据 JSON、视频、弹幕 CSV、汇总行和对应文件凭据。旧归档缺少凭据时不补造验证结果。 |
+| 已捕获数字人标记 | 仅统计可关联当前直播 ID 的已捕获平台标记：全 true、非全 true、缺失分别计数。它不表示整段连续观测，也不额外定义样本分类。 |
+
+旧数据没有新版验证凭据时会保留历史计数并显示待核验；控制台不会把未知段当成技术有效段。当前修复尚未通过真实淘宝直播长时端到端运行验证。网址文件锁是协作式 sidecar 锁；不遵守该锁的外部编辑器仍可能在极窄的写入窗口造成并发覆盖。
 
 ---
 
@@ -430,6 +454,8 @@ git push origin feature/your-feature-name
 
 ### Key Features
 
+**Local collection panel (2.6):** Manage up to five Edge crawler instances, URL lists, recording settings, environment checks, progress, and logs through a loopback-only web interface. Crawlers start only after an explicit click. See the [control panel guide](docs/control-panel.md).
+
 ✅ **Multi-Instance Parallel Recording** - 5 independent browser instances monitoring different live rooms simultaneously  
 ✅ **Smart Digital Human Detection** - Automatically identify digital human anchor live rooms  
 ✅ **Complete Data Collection** - Video recording + Barrage capture + Product info + Live data  
@@ -443,6 +469,30 @@ git push origin feature/your-feature-name
 - 📈 Live commerce effectiveness monitoring
 - 💼 Competitive live strategy analysis
 - 🎓 Academic research data collection
+
+---
+
+### Control Panel 2.6: Quick Start and Metrics
+
+**Prerequisites:** Python 3.9+, dependencies from `requirements.txt` (the crawler requires `DrissionPage`), Microsoft Edge, FFmpeg, and FFprobe. The panel web server uses Python's standard library and needs no web framework. On first launch, configure the data directory and Python, Edge, FFmpeg, and FFprobe paths in Recording Settings; save and pass Environment Check before explicitly starting collection.
+
+On Windows, double-click `scripts/open_control_panel.vbs` (it uses `pythonw.exe` by default), or run from the repository directory:
+
+```powershell
+python -m pip install -r requirements.txt
+python -B scripts/control_panel.py --open
+```
+
+Open `http://127.0.0.1:8765`. Linux/macOS can use the same Python command; configure the crawler executable paths in the panel. If no Taobao cookie exists, log in through the Edge window after starting collection.
+
+| Panel metric | Meaning |
+|---|---|
+| Historical count | Count from URL lists or legacy progress; used as the resume position, not proof that old videos were revalidated. |
+| Technically valid segments | Segments with measured FFprobe duration and matching file evidence. If no evidence exists, the panel shows “unverified”; partial totals include only evidenced segments and are marked “at least.” |
+| Complete archive segments | Segments whose archive manifest verifies the JSON, video, comment CSV, summary row, and associated file evidence. Missing legacy evidence is not reconstructed. |
+| Captured digital-human markers | Counts only captured platform markers linked to the current live ID: all true, not all true, and missing. This does not prove continuous observation or define an additional sample category. |
+
+Legacy data without current verification evidence retains its historical count and is shown as unverified; unknown segments are not counted as technically valid. The current fixes have not been validated in a long-duration end-to-end run against a real Taobao live stream. URL updates use a cooperative sidecar file lock; an external editor that ignores the lock can still race in a narrow write window.
 
 ---
 
