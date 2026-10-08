@@ -23,7 +23,7 @@ from src.utils.safe_io import atomic_json, digest
 from src.utils.segment_evidence import (EvidenceCache, validation_matches, digital_observation,
                                        observation_counts, inspect_archive)
 from src.crawler.runtime_control import pause_requested
-from src.control.url_lists import inspect as inspect_urls, save_list, correct_count
+from src.control.url_lists import inspect as inspect_urls, save_list, correct_count, canonical_live_id
 
 CONTROL = ROOT / "_control"
 VERSION = "2.6-local-panel"
@@ -333,7 +333,7 @@ class Manager:
     def correct_url_count(self, body):
         with self.lock:
             instance_id = body.get('instance_id')
-            live_id = str(body.get('live_id', '')).strip()
+            live_id = canonical_live_id(body.get('live_id', ''))
             count = body.get('count')
             reason = body.get('reason', '').strip() if isinstance(body.get('reason'), str) else ''
             if type(instance_id) is not int or not 1 <= instance_id <= 5:

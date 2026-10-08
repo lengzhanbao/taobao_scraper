@@ -9,11 +9,15 @@ let urlDirty = false;
 let refreshFailures = 0;
 let connectionLost = false;
 let stateRefreshPromise = null;
+let urlStatsGeneration = 0;
+let urlStatsController = null;
+let urlStatsPromise = null;
+let urlStatsQueued = false;
 const $ = id => document.getElementById(id);
 const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
 function message(text, error=false) { $("message").hidden=false; $("message").textContent=text; $("message").classList.toggle("error",error); }
-async function api(path, data) {
-  const controller = new AbortController();
+async function api(path, data, requestController=null) {
+  const controller = requestController || new AbortController();
   const timeout = setTimeout(()=>controller.abort(),data===undefined?10000:90000);
   try {
     const options = data===undefined ? {} : {method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:JSON.stringify(data)};
@@ -40,6 +44,19 @@ function fillSettings() {
 }
 function cell(text,small) { const td=document.createElement("td"); td.textContent=text; if(small) { const el=document.createElement("small"); el.textContent=small; td.append(el); } return td; }
 function percent(completed,total) { return total>0 ? Math.max(0,Math.min(100,completed*100/total)) : 0; }
+function canonicalLiveId(value) {
+  const text=String(value??"").trim();
+  if(/^\d{1,30}$/.test(text))return text;
+  const match=text.match(/https?:\/\/[^\s，,]+/i);
+  if(match) {
+    try {
+      const url=new URL(match[0]);
+      const host=url.hostname.toLowerCase(),liveId=url.searchParams.get("liveId")||"";
+      if((host==="taobao.com"||host.endsWith(".taobao.com"))&&/^\d{1,30}$/.test(liveId))return liveId;
+    } catch {}
+  }
+  throw new Error("请输入纯数字直播 ID 或包含有效 liveId 的淘宝直播 URL。");
+}
 function duration(seconds) { const n=Math.max(0,Math.floor(seconds||0));return Math.floor(n/60)+":"+String(n%60).padStart(2,"0"); }
 function progressBlock(completed,total,label) {
   const box=document.createElement("div");box.className="progress-block";
@@ -125,10 +142,12 @@ async function refreshState() {
   if(!dirty) fillSettings();
   renderInstances();renderChecks(state.preflight);
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
-  $("verified").textContent=state.totals.valid_segments==null?"未核验":state.totals.valid_segments;$("archived").textContent=state.totals.archived_segments??0;
+  $("verified").textContent=Number.isFinite(state.totals.valid_segments)?state.totals.valid_segments:"未核验";
+  $("archived").textContent=Number.isFinite(state.totals.archived_segments)?state.totals.archived_segments:"未核验";
   $("verified-note").textContent=state.totals.unverified_rooms?"至少为已核验数量；"+state.totals.unverified_rooms+" 间房缺少凭据":"依据视频与 final JSON 凭据复核";
   const markers=state.totals.digital_markers;
-  const markerKnown=markers&&state.totals.valid_segments!=null;
+  const markerCountsKnown=markers&&["all_true","not_all_true","missing"].every(key=>Number.isFinite(markers[key]));
+  const markerKnown=markerCountsKnown&&Number.isFinite(state.totals.valid_segments);
   $("all-true-segments").textContent=markerKnown?markers.all_true:"未核验";
   $("not-all-true-segments").textContent=markerKnown?markers.not_all_true:"未核验";
   $("flag-note").textContent=markerKnown?"另有 "+markers.missing+" 段未捕获可识别标记；仅记录，不新增样本分类":"先核验录制凭据，再显示已捕获标记";
@@ -191,23 +210,70 @@ $("instance-rows").addEventListener("click",event=>{const button=event.target.cl
 $("refresh-log").addEventListener("click",()=>logRefresh().catch(e=>message(e.message,true)));
 $("log-instance").addEventListener("change",()=>logRefresh().catch(e=>message(e.message,true)));
 refresh().catch(e=>message("无法连接控制台："+e.message,true));
-setInterval(()=>{if(!busy)refresh().catch(()=>{});},5000);
+setInterval(()=>{if(!busy){refresh().catch(()=>{});refreshUrlStats();}},5000);
 setInterval(()=>{if(!busy)logRefresh().catch(()=>{});},7000);
 
+function digitalMarkerText(markers, validCount) {
+  if(!Number.isFinite(validCount)||!markers||!["all_true","not_all_true","missing"].every(key=>Number.isFinite(markers[key])))return "未核验";
+  return markers.all_true+" / "+markers.not_all_true+" / "+markers.missing;
+}
+function renderUrlRows(rows) {
+  $("url-count").textContent=rows.length+" 间";
+  $("url-rows").replaceChildren();
+  for(const row of rows) {
+    const tr=document.createElement("tr");
+    tr.append(cell(row.live_id),cell(row.count+" / "+row.target),
+      cell(Number.isFinite(row.valid_count)?row.valid_count:"未核验"),
+      cell(digitalMarkerText(row.digital_markers,row.valid_count)),
+      cell(Number.isFinite(row.archived_count)?row.archived_count:"未核验"),
+      cell(row.validation_state||(row.count>=row.target?"历史计数已满":"待录制"),
+        row.archive_issues?.length?"归档待核查："+row.archive_issues[0]:null));
+    $("url-rows").append(tr);
+  }
+}
+function invalidateUrlStats() {
+  urlStatsGeneration++;
+  urlStatsQueued=false;
+  if(urlStatsController){urlStatsController.abort();urlStatsController=null;}
+}
+function refreshUrlStats() {
+  if(!urlDocument)return Promise.resolve();
+  if(urlStatsPromise){urlStatsQueued=true;return urlStatsPromise;}
+  const generation=++urlStatsGeneration;
+  const instanceId=String(urlDocument.instance_id);
+  const controller=new AbortController();
+  urlStatsController=controller;
+  const task=(async()=>{
+    try {
+      const result=await api("/api/urls?instance="+encodeURIComponent(instanceId),undefined,controller);
+      if(generation!==urlStatsGeneration||controller.signal.aborted||!urlDocument||
+         String(urlDocument.instance_id)!==instanceId||String($("url-instance").value)!==instanceId||
+         String(result.instance_id)!==instanceId)return;
+      if(!urlDirty) {
+        urlDocument=result;
+        if($("url-text").value!==result.active_text)$("url-text").value=result.active_text;
+      }
+      renderUrlRows(result.rows);
+    } catch(error) {
+      if(!controller.signal.aborted) return;
+    } finally {
+      if(urlStatsController===controller)urlStatsController=null;
+      if(urlStatsPromise===task)urlStatsPromise=null;
+      const queued=urlStatsQueued;urlStatsQueued=false;
+      if(queued)refreshUrlStats();
+    }
+  })();
+  urlStatsPromise=task;
+  return task;
+}
 function showUrlDocument(result) {
+  invalidateUrlStats();
   urlDocument=result;urlDirty=false;
   $("url-text").value=result.active_text;
   $("url-path").textContent=result.path;
   $("url-note").textContent="已加载 · 保存会保留原文件备份";
   $("url-count").textContent=result.rows.length+" 间";
-  $("url-rows").replaceChildren();
-  for(const row of result.rows) {
-    const tr=document.createElement("tr"),markers=row.digital_markers;
-    const flags=markers&&row.valid_count!=null?markers.all_true+" / "+markers.not_all_true+" / "+markers.missing:"未核验";
-    tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.valid_count==null?"未核验":row.valid_count),
-      cell(flags),cell(row.archived_count??0),cell(row.validation_state||(row.count>=row.target?"历史计数已满":"待录制"),
-      row.archive_issues?.length?"归档待核查："+row.archive_issues[0]:null));$("url-rows").append(tr);
-  }
+  renderUrlRows(result.rows);
   const elsewhere=new Map();
   // Cross-instance duplicates are also checked authoritatively before starting.
   for(const i of state.instances) if(i.id!==result.instance_id&&i.rooms)elsewhere.set(i.id,i.rooms);
@@ -215,6 +281,7 @@ function showUrlDocument(result) {
 }
 $("url-text").addEventListener("input",()=>{urlDirty=true;$("url-note").textContent="网址草稿未保存";});
 $("url-instance").addEventListener("change",()=>{
+  invalidateUrlStats();
   if((urlDirty||$("url-add-text").value.trim())&&urlDocument) {$("url-instance").value=String(urlDocument.instance_id);message("先保存当前网址草稿或添加追加区网址，再切换实例。",true);return;}
   urlDocument=null;$("url-text").value="";$("url-path").textContent="点击加载清单";$("url-rows").replaceChildren();$("url-count").textContent="未加载";$("url-save").disabled=true;$("url-append").disabled=true;
 });
@@ -243,7 +310,7 @@ $("url-append").addEventListener("click",()=>action(()=>saveUrls("append")));
 $("correct-submit").addEventListener("click",()=>action(async()=>{
   if(dirty)throw new Error("先保存录制设置，再更正历史计数。");
   if(!urlDocument)throw new Error("请先加载要更正的实例清单。");
-  const liveId=$("correct-live-id").value.trim();
+  const liveId=canonicalLiveId($("correct-live-id").value);
   const countText=$("correct-count").value;
   const count=Number(countText);
   const reason=$("correct-reason").value.trim();

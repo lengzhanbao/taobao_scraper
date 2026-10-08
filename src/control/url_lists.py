@@ -4,12 +4,75 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
+from contextlib import contextmanager
 from urllib.parse import urlparse, parse_qs
 import uuid
 
 
 def revision(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def canonical_live_id(value):
+    """Accept a numeric live ID or a Taobao live URL and return its ID."""
+    if not isinstance(value, str):
+        raise ValueError('直播 ID 必须是纯数字或淘宝直播 URL')
+    value = value.strip()
+    if value.isdigit() and len(value) <= 30:
+        return value
+    match = re.search(r'https?://[^\s，,]+', value)
+    if match:
+        url = urlparse(match.group(0))
+        host = (url.hostname or '').lower()
+        live_id = parse_qs(url.query).get('liveId', [''])[0]
+        if (host == 'taobao.com' or host.endswith('.taobao.com')) and live_id.isdigit() and len(live_id) <= 30:
+            return live_id
+    raise ValueError('直播 ID 必须是纯数字或淘宝直播 URL')
+
+
+@contextmanager
+def url_file_lock(path, timeout=30):
+    """Lock one URL list across processes for its full read/backup/write transaction."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + '.lock')
+    deadline = time.monotonic() + timeout
+    with lock_path.open('a+b') as stream:
+        if os.name == 'nt':
+            import msvcrt
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b'\0')
+                stream.flush()
+            while True:
+                try:
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('网址文件锁等待超时，请稍后重试') from error
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            while True:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as error:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('网址文件锁等待超时，请稍后重试') from error
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def parse_input(text):
@@ -53,6 +116,11 @@ def inspect(path, target):
 def save_list(path, target, text, expected_revision, mode='replace'):
     """Omitted entries become comments; originals and exact bytes are backed up."""
     path = Path(path)
+    with url_file_lock(path):
+        return _save_list_locked(path, target, text, expected_revision, mode)
+
+
+def _save_list_locked(path, target, text, expected_revision, mode):
     current = inspect(path, target)
     if expected_revision != current['revision']:
         raise ValueError('网址文件已被其他操作修改。请重新加载后再保存；页面草稿仍保留。')
@@ -118,10 +186,14 @@ def save_list(path, target, text, expected_revision, mode='replace'):
 def correct_count(path, target, live_id, count, expected_revision):
     """Set one room's counter exactly, including retained history, with a full backup."""
     path = Path(path)
-    if not isinstance(live_id, str) or not live_id.isdigit() or len(live_id) > 30:
-        raise ValueError('直播 ID 无效')
+    live_id = canonical_live_id(live_id)
     if type(count) is not int or not 0 <= count <= 10000:
         raise ValueError('更正段数必须是 0—10000 的整数')
+    with url_file_lock(path):
+        return _correct_count_locked(path, target, live_id, count, expected_revision)
+
+
+def _correct_count_locked(path, target, live_id, count, expected_revision):
     current = inspect(path, target)
     if current['revision'] != expected_revision:
         raise ValueError('网址文件已被其他操作修改。请重新加载后再更正。')

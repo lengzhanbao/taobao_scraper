@@ -2,10 +2,13 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
+import time
 import unittest
 import uuid
 
-from src.control.url_lists import inspect, parse_input, save_list, correct_count
+from src.control.url_lists import inspect, parse_input, save_list, correct_count, canonical_live_id
 from src.control.settings import read_url_list, defaults
 from src.control.server import Manager
 
@@ -94,12 +97,60 @@ class UrlListsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             correct_count(self.path, 3, '123', True, document['revision'])
 
+    def test_correction_accepts_numeric_or_taobao_url(self):
+        self.path.write_text('https://tbzb.taobao.com/live?liveId=123,已录制2/3\n', encoding='utf-8')
+        document = inspect(self.path, 3)
+        self.assertEqual(canonical_live_id(' 123 '), '123')
+        self.assertEqual(canonical_live_id('https://tbzb.taobao.com/live?liveId=123'), '123')
+        corrected = correct_count(self.path, 3, 'https://tbzb.taobao.com/live?liveId=123', 1,
+                                  document['revision'])
+        self.assertEqual(read_url_list(self.path, 3)[0]['count'], 1)
+        self.assertEqual(Path(corrected['backup']).read_text(encoding='utf-8'),
+                         'https://tbzb.taobao.com/live?liveId=123,已录制2/3\n')
+
+    def test_url_file_lock_serializes_cross_process_correction(self):
+        self.path.write_text('https://tbzb.taobao.com/live?liveId=123,已录制2/3\n', encoding='utf-8')
+        document = inspect(self.path, 3)
+        ready = self.root / 'lock-held.txt'
+        script = """
+import sys, time
+from pathlib import Path
+from src.control.url_lists import url_file_lock
+with url_file_lock(Path(sys.argv[1])):
+    Path(sys.argv[2]).write_text('locked', encoding='utf-8')
+    time.sleep(0.6)
+"""
+        child = subprocess.Popen([sys.executable, '-c', script, str(self.path), str(ready)],
+                                 cwd=Path(__file__).resolve().parents[1],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), 'child process failed to acquire URL lock')
+            started = time.monotonic()
+            correct_count(self.path, 3, '123', 1, document['revision'])
+            waited = time.monotonic() - started
+            self.assertGreaterEqual(waited, 0.35)
+            self.assertEqual(read_url_list(self.path, 3)[0]['count'], 1)
+        finally:
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.terminate()
+                child.wait(timeout=5)
+
     def test_manager_uses_configured_file_only(self):
         manager = Manager(defaults(self.root / 'study'), control=self.root / 'control')
         document = manager.url_document(1)
         result = manager.save_urls({'instance_id': 1, 'text': '123\n123', 'revision': document['revision']})
         self.assertEqual(len(result['rows']), 1)
         self.assertEqual(result['active_text'], 'https://tbzb.taobao.com/live?liveId=123,已录制0/3')
+        corrected = manager.correct_url_count({'instance_id': 1,
+            'live_id': 'https://tbzb.taobao.com/live?liveId=123', 'count': 1,
+            'reason': 'synthetic URL-form correction', 'confirmed': True,
+            'revision': result['revision']})
+        self.assertEqual(corrected['rows'][0]['count'], 1)
         self.assertTrue(Path(result['path']).is_relative_to(self.root / 'study'))
         for identifier in (0, 6, True, '../other'):
             with self.assertRaises(ValueError):

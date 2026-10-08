@@ -9,6 +9,10 @@ const intervals=[];
 let failState=false;
 let hangState=false;
 let hangAction=false;
+let urlStatsCounts={1:1,2:1};
+let urlRowOverride=null;
+let holdNextUrlStats=false;
+let releaseHeldUrlStats=null;
 class Element {
   constructor(tag="div") {
     this.tag=tag;this.children=[];this.dataset={};this.listeners={};this.attributes={};
@@ -39,7 +43,7 @@ const fixture = {token:"synthetic",version:"2.4-local-panel",code_root:"syntheti
       status:{live_id:"123",segment_index:1,elapsed_seconds:45,planned_duration_seconds:60}}]};
 fixture.settings.instances=fixture.instances;
 const requests=[];
-const context=vm.createContext({console,AbortController,
+const context=vm.createContext({console,AbortController,URL,
   setTimeout(callback,ms){return setTimeout(callback,(hangState&&ms===10000)||(hangAction&&ms===90000)?5:ms);},clearTimeout,
   setInterval(callback,ms){intervals.push({callback,ms});},window:{confirm:()=>true},document:{
   getElementById(id){if(!elements.has(id)){const element=new Element();element.id=id;}return elements.get(id);},
@@ -50,7 +54,19 @@ const context=vm.createContext({console,AbortController,
     options.signal.addEventListener('abort',()=>{const error=new Error('synthetic abort');error.name='AbortError';reject(error);},{once:true});
   });
   if(route==="/api/state"){if(failState)throw new Error("synthetic offline");return {ok:true,json:async()=>fixture};}
-  if(route.startsWith('/api/urls'))return {ok:true,json:async()=>({instance_id:1,path:'synthetic/urls_1.txt',revision:'abc',active_text:'https://tbzb.taobao.com/live?liveId=123',rows:[{live_id:'123',count:1,target:3,valid_count:null,archived_count:0,validation_state:'未核验'}],message:'saved',correction_id:'synthetic-correction'})};
+  if(route.startsWith('/api/urls')) {
+    const url=new URL(route,'http://localhost'),instanceId=Number(url.searchParams.get('instance')||1);
+    const makeDocument=id=>({instance_id:id,path:`synthetic/urls_${id}.txt`,revision:id===1?'abc':'def',
+      active_text:`https://tbzb.taobao.com/live?liveId=${id===1?'123':'222'}`,
+      rows:[urlRowOverride?{...urlRowOverride,live_id:id===1?'123':'222'}:
+        {live_id:id===1?'123':'222',count:urlStatsCounts[id]||1,target:3,valid_count:null,archived_count:0,validation_state:'未核验'}],
+      message:'saved',correction_id:'synthetic-correction'});
+    if(!options?.method&&holdNextUrlStats) {
+      holdNextUrlStats=false;
+      return new Promise(resolve=>{releaseHeldUrlStats=()=>resolve({ok:true,json:async()=>makeDocument(instanceId)});});
+    }
+    return {ok:true,json:async()=>makeDocument(instanceId)};
+  }
   return {ok:true,json:async()=>({message:"synthetic action accepted"})};
 }});
 vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/control/web/app.js"),"utf8"),context);
@@ -94,6 +110,18 @@ async function main() {
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(elements.get('url-text').value,'https://tbzb.taobao.com/live?liveId=123');
   assert.equal(elements.get('url-rows').children.length,1);
+  urlStatsCounts[1]=2;
+  intervals.find(item=>item.ms===5000).callback();
+  await Promise.all([vm.runInContext('stateRefreshPromise',context),vm.runInContext('urlStatsPromise',context)]);
+  assert.equal(elements.get('url-rows').children[0].children[1].textContent,'2 / 3');
+  assert.equal(elements.get('url-count').textContent,'1 间');
+  elements.get('url-text').value='未保存草稿';
+  elements.get('url-text').listeners.input();
+  urlStatsCounts[1]=3;
+  await vm.runInContext('refreshUrlStats()',context);
+  assert.equal(elements.get('url-rows').children[0].children[1].textContent,'3 / 3');
+  assert.equal(elements.get('url-text').value,'未保存草稿');
+  assert.equal(vm.runInContext('urlDocument.revision',context),'abc');
   elements.get('url-text').value='123\n456';
   elements.get('url-text').listeners.input();
   elements.get('url-save').listeners.click();
@@ -104,13 +132,14 @@ async function main() {
   fixture.version='2.5-local-panel';
   await vm.runInContext('refresh()',context);
   assert.equal(elements.get('correct-submit').disabled,false);
-  elements.get('correct-live-id').value='123';
+  elements.get('correct-live-id').value='https://tbzb.taobao.com/live?liveId=123';
   elements.get('correct-count').value='0';
   elements.get('correct-reason').value='逐段核验后修正';
   elements.get('correct-confirmed').checked=true;
   elements.get('correct-submit').listeners.click();
   await new Promise(resolve=>setImmediate(resolve));
   const correction=requests.find(request=>request.route==='/api/urls/correct-count');
+  assert.equal(JSON.parse(correction.options.body).live_id,'123');
   assert.equal(JSON.parse(correction.options.body).count,0);
   assert.equal(JSON.parse(correction.options.body).confirmed,true);
   assert.equal(JSON.parse(correction.options.body).revision,'abc');
@@ -166,6 +195,35 @@ async function main() {
   await assert.rejects(vm.runInContext('api("/api/urls",{instance_id:1})',context),/后台可能已完成/);
   assert.equal(requests.filter(request=>request.options?.method==='POST').length,mutationsBefore+1);
   hangAction=false;
+  fixture.totals={rooms:0,completed_rooms:0,recorded_segments:0,valid_segments:0,remaining_segments:0,
+    target_segments:0,completed_segments:0,digital_markers:{all_true:0,not_all_true:0}};
+  await vm.runInContext('refresh()',context);
+  assert.equal(elements.get('archived').textContent,'未核验');
+  assert.equal(elements.get('all-true-segments').textContent,'未核验');
+  assert.equal(elements.get('not-all-true-segments').textContent,'未核验');
+  fixture.totals.archived_segments=0;
+  fixture.totals.digital_markers={all_true:0,not_all_true:0,missing:0};
+  await vm.runInContext('refresh()',context);
+  assert.equal(elements.get('archived').textContent,'0');
+  assert.equal(elements.get('all-true-segments').textContent,'0');
+  vm.runInContext('dirty=false',context);
+  elements.get('url-reload').listeners.click();
+  await new Promise(resolve=>setImmediate(resolve));
+  holdNextUrlStats=true;
+  const stale=vm.runInContext('refreshUrlStats()',context);
+  elements.get('url-instance').value='2';
+  elements.get('url-instance').listeners.change();
+  assert.equal(elements.get('url-rows').children.length,0);
+  await elements.get('url-load').listeners.click();
+  releaseHeldUrlStats();
+  await stale;
+  assert.equal(elements.get('url-rows').children[0].children[0].textContent,'222');
+  assert.equal(elements.get('url-text').value,'https://tbzb.taobao.com/live?liveId=222');
+  urlRowOverride={count:1,target:3,valid_count:1,digital_markers:{all_true:1,not_all_true:0}};
+  await vm.runInContext('refreshUrlStats()',context);
+  assert.equal(elements.get('url-rows').children[0].children[2].textContent,'1');
+  assert.equal(elements.get('url-rows').children[0].children[3].textContent,'未核验');
+  assert.equal(elements.get('url-rows').children[0].children[4].textContent,'未核验');
   console.log("Dashboard checks passed: verified-only progress, disconnected/recovered state, version, pause/resume, URLs.");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
