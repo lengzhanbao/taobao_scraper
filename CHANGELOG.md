@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- 数字人检测统一保留 `isDigitalAnchorLive` 的 true、false 和缺失三态；只把平台标记全 true 的段视为严格数字人段。
+- 汇总 CSV 增加段落与 room 层的全 true、含 false、缺失标记和段数；false 段标记为排除候选并保留原始证据。
+- 标题含“虚拟主播”或“智能主播”时按研究口径标记数字人，同时保留平台原始标记。
+
 ## [2.0.3] - 2026-09-03
 
 ### Fixed

@@ -26,6 +26,10 @@ except Exception:
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT as CFG_STUDY_ROOT, EDGE_PATH as CFG_EDGE_PATH
+from src.utils.digital_flags import (
+    normalize_digital_flag, parse_json_body, summarize_digital_flags,
+    title_keywords_in_values,
+)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STUDY_ROOT = Path(os.environ.get("LIVE_STUDY_ROOT", str(CFG_STUDY_ROOT)))
@@ -77,11 +81,7 @@ def find_keys(obj, key):
 
 
 def as_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return str(value or "").strip().lower() in ("true", "1", "yes")
+    return normalize_digital_flag(value)
 
 
 def first_text(values):
@@ -97,20 +97,13 @@ def first_text(values):
 def normalize_body(body):
     if body is None:
         return None, ""
-    if isinstance(body, dict):
-        return body, json.dumps(body, ensure_ascii=False)
-    if isinstance(body, str):
-        text = body
-        try:
-            parsed = json.loads(text)
-            return parsed, text
-        except Exception:
-            return None, text
-    try:
+    if isinstance(body, bytes):
+        text = body.decode("utf-8", errors="replace")
+    elif isinstance(body, (dict, list)):
+        text = json.dumps(body, ensure_ascii=False)
+    else:
         text = str(body)
-        return None, text
-    except Exception:
-        return None, ""
+    return parse_json_body(body), text
 
 
 def parse_live_response(body, expected_lid):
@@ -119,14 +112,30 @@ def parse_live_response(body, expected_lid):
         return None
 
     result = {}
+    title_values = []
     if parsed is not None:
         digital_values = find_keys(parsed, "isDigitalAnchorLive")
-        if digital_values:
-            result["isDigitalAnchorLive"] = as_bool(digital_values[0])
-        result["liveId"] = first_text(find_keys(parsed, "liveId"))
-        result["liveTitle"] = first_text(
-            find_keys(parsed, "liveTitle") or find_keys(parsed, "title")
+        flag_summary = summarize_digital_flags(digital_values)
+        result["isDigitalAnchorLive"] = (
+            True if flag_summary["all_true"]
+            else False if flag_summary["all_false"]
+            else None
         )
+        result["isDigitalAnchorLiveValues"] = [
+            "true" if as_bool(value) is True
+            else "false" if as_bool(value) is False
+            else "unknown"
+            for value in digital_values
+        ]
+        result["digitalFlagStatus"] = flag_summary["status"]
+        result["platformAllTrue"] = flag_summary["all_true"]
+        result["platformHasFalse"] = flag_summary["has_false"]
+        result["platformHasMissing"] = flag_summary["has_missing"]
+        result["liveId"] = first_text(find_keys(parsed, "liveId"))
+        title_values = find_keys(parsed, "liveTitle")
+        if not title_values:
+            title_values = find_keys(parsed, "title")
+        result["liveTitle"] = first_text(title_values)
         result["anchorName"] = first_text(
             find_keys(parsed, "nickName")
             or find_keys(parsed, "anchorName")
@@ -138,20 +147,43 @@ def parse_live_response(body, expected_lid):
             or find_keys(parsed, "isLive")
         )
     else:
-        m = re.search(
-            r'"isDigitalAnchorLive"\s*:\s*("(?:true|false)"|true|false)', text
+        raw_flags = re.findall(
+            r'"isDigitalAnchorLive"\s*:\s*("(?:true|false)"|true|false)',
+            text,
         )
-        if m:
-            result["isDigitalAnchorLive"] = m.group(1).strip('"').lower() == "true"
+        if raw_flags:
+            flag_values = [value.strip('"').lower() for value in raw_flags]
+            flag_summary = summarize_digital_flags(flag_values)
+            result["isDigitalAnchorLive"] = (
+                True if flag_summary["all_true"]
+                else False if flag_summary["all_false"]
+                else None
+            )
+            result["isDigitalAnchorLiveValues"] = flag_values
+            result["digitalFlagStatus"] = flag_summary["status"]
+            result["platformAllTrue"] = flag_summary["all_true"]
+            result["platformHasFalse"] = flag_summary["has_false"]
+            result["platformHasMissing"] = flag_summary["has_missing"]
         for key in ("liveId", "liveTitle", "title", "nickName", "anchorName", "userName", "liveStatus", "status", "isLive"):
             mm = re.search(rf'"{key}"\s*:\s*"([^"]*)"', text)
             if mm:
                 result[key] = mm.group(1)
+                if key in ("liveTitle", "title"):
+                    title_values.append(mm.group(1))
 
     if result.get("liveId") and result["liveId"] != expected_lid:
         return None
     if result.get("liveId") is None:
         result["liveId"] = expected_lid
+    result.setdefault("isDigitalAnchorLive", None)
+    result.setdefault("isDigitalAnchorLiveValues", [])
+    result.setdefault("digitalFlagStatus", "unknown")
+    result.setdefault("platformAllTrue", False)
+    result.setdefault("platformHasFalse", False)
+    result.setdefault("platformHasMissing", True)
+    result["titleRuleOverride"] = list(
+        title_keywords_in_values(title_values or [result.get("liveTitle")])
+    )
     result["raw_snippet"] = text[:1500]
     return result
 
@@ -243,11 +275,30 @@ def check_one(page, live_id):
             "liveId": live_id,
             "status": "no_api",
             "isDigitalAnchorLive": None,
+            "isDigitalAnchorLiveValues": [],
+            "digitalFlagStatus": "missing",
+            "platformAllTrue": False,
+            "platformHasFalse": False,
+            "platformHasMissing": True,
+            "titleRuleOverride": [],
             "note": "live.detail.get not captured; may be offline, login expired, or risk control",
         }
 
-    digital = result.get("isDigitalAnchorLive")
-    result["status"] = "digital" if digital is True else "human" if digital is False else "unknown"
+    title_override = bool(result.get("titleRuleOverride"))
+    flag_status = result.get("digitalFlagStatus")
+    if title_override or flag_status == "all_true":
+        result["status"] = "digital"
+    elif flag_status == "mixed":
+        result["status"] = "mixed"
+    elif flag_status == "all_false":
+        result["status"] = "platform_false"
+    elif result.get("platformHasFalse"):
+        result["status"] = "review"
+    else:
+        result["status"] = "unknown"
+    result["digitalBasis"] = (
+        "title_keyword" if title_override else flag_status
+    )
     return result
 
 
@@ -304,15 +355,24 @@ def main(argv=None):
             log(
                 f"  -> {result.get('status')} "
                 f"digital={result.get('isDigitalAnchorLive')} "
+                f"flags={result.get('isDigitalAnchorLiveValues')} "
+                f"title_rule={result.get('titleRuleOverride')} "
                 f"title={result.get('liveTitle') or ''}"
             )
             if index < len(ids):
                 time.sleep(2)
 
         digital_ids = [r["liveId"] for r in results if r.get("status") == "digital"]
-        human_ids = [r["liveId"] for r in results if r.get("status") == "human"]
-        unknown_ids = [r["liveId"] for r in results if r.get("status") != "digital" and r.get("status") != "human"]
-        log(f"digital={len(digital_ids)} human={len(human_ids)} unknown={len(unknown_ids)}")
+        platform_false_ids = [
+            r["liveId"] for r in results if r.get("status") == "platform_false"
+        ]
+        mixed_ids = [r["liveId"] for r in results if r.get("status") == "mixed"]
+        review_ids = [r["liveId"] for r in results if r.get("status") == "review"]
+        unknown_ids = [r["liveId"] for r in results if r.get("status") == "unknown"]
+        log(
+            f"digital={len(digital_ids)} platform_false={len(platform_false_ids)} "
+            f"mixed={len(mixed_ids)} review={len(review_ids)} unknown={len(unknown_ids)}"
+        )
         log("digital ids: " + ", ".join(digital_ids))
 
         digital_lines = [

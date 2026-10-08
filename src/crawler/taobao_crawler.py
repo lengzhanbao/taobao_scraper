@@ -29,6 +29,10 @@ from src.utils.config import (
     MAX_MIN, MAX_ROUND, COOLDOWN_SEC, PRODUCT_MIN_SEC,
     MAX_COLLECTED, SEG_NAMES, USER_AGENT,
 )
+from src.utils.digital_flags import (
+    find_values_by_key, parse_json_body,
+    summarize_digital_flags, title_keywords_in_values,
+)
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", sys.argv[1])
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
@@ -278,21 +282,52 @@ def scan_room(url, live_id):
         time.sleep(1)
     if not state["stream_url"]["url"]:
         return False
-    # 数字人确认
-    dig = None
+    # Preserve true/false/missing as separate states. A false segment is not a
+    # confirmed digital segment under the study's strict platform-flag rule.
+    digital_values = []
+    title_values = []
     for c in state["collected"]:
-        if "live.detail.get" in (c.get("url") or ""):
-            try:
-                body = c.get("body","")
-                if isinstance(body, str):
-                    m = re.search(r'"isDigitalAnchorLive"\s*:\s*"(true|false)"', body)
-                    if m:
-                        dig = (m.group(1)=="true"); break
-            except:
-                pass
-    if dig is not True:
-        return False
-    return True
+        if "live.detail.get" not in (c.get("url") or ""):
+            continue
+        parsed = parse_json_body(c.get("body", ""))
+        if parsed is None:
+            continue
+        response_ids = [
+            str(value) for value in find_values_by_key(parsed, "liveId")
+            if value is not None
+        ]
+        if str(live_id) not in response_ids:
+            continue
+        digital_values.extend(
+            find_values_by_key(parsed, "isDigitalAnchorLive")
+        )
+        response_titles = find_values_by_key(parsed, "liveTitle")
+        if not response_titles:
+            response_titles = find_values_by_key(parsed, "title")
+        title_values.extend(response_titles)
+
+    flag_summary = summarize_digital_flags(digital_values)
+    title_matches = title_keywords_in_values(title_values)
+    if title_matches:
+        log(
+            f"  数字人标记：标题命中={'、'.join(title_matches)}；"
+            f"平台={flag_summary['raw_label']}（按标题规则保留）"
+        )
+        return True
+    if flag_summary["all_true"]:
+        log("  数字人标记：该次响应全 true（按平台标记保留）")
+        return True
+    if flag_summary["has_false"]:
+        log(
+            f"  数字人标记：含 false（平台={flag_summary['raw_label']}），"
+            "按数字人样本口径跳过"
+        )
+    else:
+        log(
+            f"  数字人标记：缺失或不完整（平台={flag_summary['raw_label']}），"
+            "待核查并跳过"
+        )
+    return False
 
 def record_room(url, live_id, room_dir, surl, seg_name):
     """录制，录完存到 seg_name（第一段/第二段...）"""

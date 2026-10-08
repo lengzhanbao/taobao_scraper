@@ -9,6 +9,10 @@ import os, sys, time, json, re, random
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT, EDGE_PATH, USER_AGENT
+from src.utils.digital_flags import (
+    find_values_by_key, parse_json_body,
+    summarize_digital_flags, title_keywords_in_values,
+)
 OUTDIR = os.path.join(STUDY_ROOT, "_staging")
 URLS_FILE = os.path.join(STUDY_ROOT, "_config", "live_urls.txt")
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
@@ -226,27 +230,56 @@ for round_n in range(20):
             except:
                 checked_ids.add(lid)
                 continue
-        is_digital = None
+        digital_values = []
+        title_values = []
+        matched_detail_response = False
         for c in drain_responses(CHECK_TIMEOUT):
             if "live.detail.get" in c.get("url","") and "mtop" in c.get("url",""):
                 body = c.get("body","")
-                # ⚠️ 关键修复：必须 liveId 匹配，防止读到上一个房间的残留响应
-                m_lid = re.search(r'"liveId"\s*:\s*"(\d+)"', body)
-                if not m_lid or m_lid.group(1) != lid:
+                parsed = parse_json_body(body)
+                if parsed is None:
                     continue
-                m = re.search(r'"isDigitalAnchorLive"\s*:\s*"(true|false)"', body)
-                if m:
-                    is_digital = (m.group(1) == "true")
-                    checked_ids.add(lid)
-                    break
-        if is_digital is True:
+                # Require the current liveId; ignore a stale response from prior room.
+                response_ids = [
+                    str(value) for value in find_values_by_key(parsed, "liveId")
+                    if value is not None
+                ]
+                if lid not in response_ids:
+                    continue
+                matched_detail_response = True
+                digital_values.extend(
+                    find_values_by_key(parsed, "isDigitalAnchorLive")
+                )
+                response_titles = find_values_by_key(parsed, "liveTitle")
+                if not response_titles:
+                    response_titles = find_values_by_key(parsed, "title")
+                title_values.extend(response_titles)
+
+        if matched_detail_response:
+            checked_ids.add(lid)
+        flag_summary = summarize_digital_flags(digital_values)
+        title_matches = title_keywords_in_values(title_values)
+        if title_matches or flag_summary["all_true"]:
             digital_urls.append(f"https://tbzb.taobao.com/live?liveId={lid}")
             save_urls()  # 立刻写盘，中断不丢
-            log(f"  [{len(checked_ids)}] ✅ 数字人 {lid[:12]} 累计 {len(digital_urls)}")
-        elif is_digital is False:
-            log(f"  [{len(checked_ids)}] ❌ 真人")
+            basis = (
+                f"标题命中{'、'.join(title_matches)}"
+                if title_matches else "平台标记全 true"
+            )
+            log(
+                f"  [{len(checked_ids)}] ✅ 数字人({basis}) "
+                f"平台={flag_summary['raw_label']} {lid[:12]} 累计 {len(digital_urls)}"
+            )
+        elif flag_summary["has_false"]:
+            log(
+                f"  [{len(checked_ids)}] 含 false，按数字人样本口径排除 "
+                f"平台={flag_summary['raw_label']} {lid[:12]}"
+            )
         else:
-            log(f"  [{len(checked_ids)}] ⚠️ 超时")
+            log(
+                f"  [{len(checked_ids)}] ⚠️ 未确认，平台="
+                f"{flag_summary['raw_label']} {lid[:12]}"
+            )
 
 if digital_urls:
     save_urls()

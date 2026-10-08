@@ -11,6 +11,11 @@ if hasattr(sys.stderr, "reconfigure"):
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT
+from src.utils.digital_flags import (
+    classify_digital_segment, find_values_by_key,
+    summarize_digital_flags, summarize_room_digital_flags,
+    title_keywords_in_values,
+)
 SESSIONS = os.path.join(STUDY_ROOT, "sessions")
 os.makedirs(SESSIONS, exist_ok=True)
 
@@ -140,6 +145,8 @@ def process_room(room_dir):
 
     # —— 从副本解析 ——
     rows = []
+    segment_flag_summaries = []
+    segment_titles_by_row = []
     for fi, fp in enumerate(copied):
         print(f"  段{fi+1}: {os.path.basename(fp)[:30]}...")
         data = json.load(open(fp, encoding="utf-8"))
@@ -164,10 +171,35 @@ def process_room(room_dir):
                        "headImg","coverImg","backgroundImageURL",
                        "liveIntroduction","curItemNum"]:
                 v = deep_find(o, key)
-                if v is not None and not live.get(key): live[key] = v
+                if v is None:
+                    continue
+                if key == "isDigitalAnchorLive":
+                    if key not in live:
+                        live[key] = v
+                elif not live.get(key):
+                    live[key] = v
+
+        segment_digital_values = [
+            value
+            for obj in dc_parsed
+            for value in find_values_by_key(obj, "isDigitalAnchorLive")
+        ]
+        segment_flag_summary = summarize_digital_flags(segment_digital_values)
 
         _title = live.get("title") or live.get("liveTitle") or ""
         _anchor = live.get("accountName") or live.get("anchorName") or ""
+        segment_title_values = [
+            value
+            for obj in dc_parsed
+            for value in find_values_by_key(obj, "liveTitle")
+        ]
+        if not segment_title_values:
+            segment_title_values = [
+                value
+                for obj in dc_parsed
+                for value in find_values_by_key(obj, "title")
+            ]
+        title_hits = title_keywords_in_values(segment_title_values or [_title])
 
         # 主播认证 / 代理店 / 回头客（anchornavigation）
         nav = groups.get("mtop.tblive.live.shopwindow.anchornavigation", [])
@@ -279,7 +311,11 @@ def process_room(room_dir):
             cap_s = f"{t6[:2]}:{t6[2:4]}:{t6[4:]}"
         except: date_s = cap_s = ""
         rec_dur = round(data.get("record_end_t", 0) - data.get("record_start_t", 0))
-        digital = "是" if str(live.get("isDigitalAnchorLive", "")).lower() == "true" else ""
+        segment_classification = classify_digital_segment(
+            segment_flag_summary, title_hits
+        )
+        digital = segment_classification["digital_label"]
+        sample_handling = segment_classification["sample_handling"]
 
         row = {
             "段": f"第{fi+1}段",
@@ -299,7 +335,13 @@ def process_room(room_dir):
             "主播头像": live.get("headImg", ""),
             "背景图": live.get("coverImg") or live.get("backgroundImageURL") or "",
             "直播时长(分钟)": round(rec_dur / 60, 1) if rec_dur else "",
-            "是否数字人": digital, "品类": live.get("categoryLevelOneName", ""),
+            "是否数字人": digital,
+            "平台原始isDigitalAnchorLive": segment_flag_summary["raw_label"],
+            "段落是否全true": "是" if segment_flag_summary["all_true"] else "否",
+            "段落是否含false": "是" if segment_flag_summary["has_false"] else "否",
+            "数字人标题规则命中": "、".join(title_hits) or "否",
+            "数字人样本处理": sample_handling,
+            "品类": live.get("categoryLevelOneName", ""),
             "店铺ID": live.get("shopId", "") or live.get("accountId", ""),
             "店铺类型": live.get("bizCode", ""),
             "主播认证": anchor_cert, "是否代理店": agent_shop_flag,
@@ -308,6 +350,8 @@ def process_room(room_dir):
             "新增粉丝量": new_fans,
         }
         rows.append(row)
+        segment_flag_summaries.append(segment_flag_summary)
+        segment_titles_by_row.append(title_hits)
 
         # 该段的弹幕单独CSV
         sess_dir = os.path.join(SESSIONS, pair_str)
@@ -334,11 +378,49 @@ def process_room(room_dir):
 
     # 汇总CSV
     if rows:
+        room_summary = summarize_room_digital_flags(
+            segment_flag_summaries, segment_titles_by_row
+        )
+        for row in rows:
+            row.update({
+                "房间平台标记": room_summary["flag_label"],
+                "房间是否全段true": "是" if room_summary["all_true"] else "否",
+                "房间是否含false": "是" if room_summary["has_false"] else "否",
+                "房间是否含缺失标记": "是" if room_summary["has_missing"] else "否",
+                "房间true段数": room_summary["true_segment_count"],
+                "房间false段数": room_summary["false_segment_count"],
+                "房间缺失段数": room_summary["missing_segment_count"],
+                "房间标题规则命中": "、".join(room_summary["title_matches"]) or "否",
+                "房间最终归类": room_summary["classification"],
+            })
+            if room_summary["title_matches"]:
+                row["是否数字人"] = "是"
+                row["数字人样本处理"] = "保留：room标题规则覆盖"
+
+        for row, summary, title_hits in zip(
+            rows, segment_flag_summaries, segment_titles_by_row
+        ):
+            print(
+                f"    数字人标记: 平台={summary['raw_label']}，"
+                f"段落全true={'是' if summary['all_true'] else '否'}，"
+                f"段落含false={'是' if summary['has_false'] else '否'}，"
+                f"标题规则={'、'.join(title_hits) or '无'}，"
+                f"是否数字人={row['是否数字人']}，"
+                f"处理={row['数字人样本处理']}"
+            )
+
         sess_dir = os.path.join(SESSIONS, pair_str)
         cra_dir = os.path.join(sess_dir, "crawler")
         os.makedirs(cra_dir, exist_ok=True)
         sp = os.path.join(cra_dir, f"lives_summary_{pair_str}.csv")
         write_csv(sp, rows, list(rows[0].keys()), overwrite=True)
+        print(
+            f"  房间数字人标记: {room_summary['flag_label']}，"
+            f"true段={room_summary['true_segment_count']} "
+            f"false段={room_summary['false_segment_count']} "
+            f"缺失段={room_summary['missing_segment_count']}，"
+            f"最终={room_summary['classification']}"
+        )
         print(f"  汇总: lives_summary_{pair_str}.csv ({len(rows)}行)")
 
     # 验证全部 FLV 复制成功
