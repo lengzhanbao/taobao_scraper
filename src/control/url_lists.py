@@ -59,14 +59,23 @@ def save_list(path, target, text, expected_revision, mode='replace'):
     if mode not in ('replace', 'append'):
         raise ValueError('网址操作无效')
     incoming = parse_input(text)
-    # Existing legacy lines can contain labels/metadata; retain every original line.
+    # Preserve the highest known counter across active and previously disabled lines.
     existing = {}
+    history = {}
+    other_comments = []
     for line in current['text'].splitlines():
         match = re.search(r'liveId=(\d+)\b', line)
         count = re.search(r'已录制(\d+)/(\d+)', line)
         if match:
             key = match.group(1)
-            existing[key] = max(existing.get(key, 0), int(count.group(1)) if count else 0)
+            recorded = int(count.group(1)) if count else 0
+            existing[key] = max(existing.get(key, 0), recorded)
+            if line.lstrip().startswith('#'):
+                history[key] = max(history.get(key, 0), recorded)
+            elif mode == 'replace' and key not in incoming:
+                history[key] = max(history.get(key, 0), recorded)
+        elif line.lstrip().startswith('#'):
+            other_comments.append(line)
     if mode == 'append':
         # Disabled entries stay disabled unless explicitly added again.
         for line in current['text'].splitlines():
@@ -74,20 +83,27 @@ def save_list(path, target, text, expected_revision, mode='replace'):
                 match = re.search(r'liveId=(\d+)\b', line)
                 if match:
                     incoming.setdefault(match.group(1), existing[match.group(1)])
-    lines = []
-    for line in current['text'].splitlines():
-        if line.strip():
-            lines.append(line if line.lstrip().startswith('#') else '# 历史保留 ' + line)
+    lines = list(dict.fromkeys(line for line in other_comments if line.strip()))
+    for live_id, count in history.items():
+        lines.append(f'# 历史保留 https://tbzb.taobao.com/live?liveId={live_id},已录制{count}/{target}')
     for live_id, count in incoming.items():
         lines.append(f'https://tbzb.taobao.com/live?liveId={live_id},已录制{max(count, existing.get(live_id, 0))}/{target}')
+    output = '\n'.join(lines) + ('\n' if lines else '')
+    if output.encode('utf-8') == current['text'].encode('utf-8'):
+        return {**current, 'backup': None, 'rooms': len(incoming)}
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
     if path.exists():
-        backup = path.with_name(path.name + '.bak_' + uuid.uuid4().hex)
-        shutil.copy2(path, backup)
+        content_hash = revision(path.read_bytes())
+        backup = path.with_name(path.name + '.bak_' + content_hash)
+        if backup.exists():
+            if revision(backup.read_bytes()) != content_hash:
+                raise ValueError('同名备份已存在但内容校验不一致，原清单未修改')
+        else:
+            shutil.copy2(path, backup)
     temp = path.with_name(path.name + '.tmp_' + uuid.uuid4().hex)
     with temp.open('x', encoding='utf-8', newline='\n') as stream:
-        stream.write('\n'.join(lines) + ('\n' if lines else ''))
+        stream.write(output)
         stream.flush()
         os.fsync(stream.fileno())
     # A second revision check catches external writes during backup preparation.

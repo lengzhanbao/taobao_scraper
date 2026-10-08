@@ -18,23 +18,101 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 import webbrowser
 
-from src.control.settings import ROOT, defaults, validate, read_url_list, build_environment
+from src.control.settings import ROOT, defaults, validate, migrate_settings, read_url_list, build_environment
 from src.utils.safe_io import atomic_json
 from src.crawler.runtime_control import pause_requested
 from src.control.url_lists import inspect as inspect_urls, save_list
 
 CONTROL = ROOT / "_control"
-VERSION = "2.3-local-panel"
+VERSION = "2.4-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 
 
 def summarize_rows(rows):
     target = sum(row["target"] for row in rows)
     completed = sum(min(row["count"], row["target"]) for row in rows)
+    verified = sum(row.get("valid_count", 0) for row in rows)
+    archived = sum(row.get("archived_count", 0) for row in rows)
+    verified_completed = sum(min(row.get("valid_count", 0), row["target"]) for row in rows)
     return {"rooms": len(rows), "complete": sum(r["count"] >= r["target"] for r in rows),
+            "verified_complete": sum(r.get("valid_count", 0) >= r["target"] for r in rows),
             "recorded": sum(r["count"] for r in rows), "remaining": target - completed,
-            "target_segments": target, "completed_segments": completed,
-            "progress_percent": round(completed * 100 / target, 1) if target else 0}
+            "valid_segments": verified, "archived_segments": archived,
+            "target_segments": target, "completed_segments": verified_completed,
+            "progress_percent": round(verified_completed * 100 / target, 1) if target else 0}
+
+
+def verified_progress_counts(progress, study_root):
+    """Count only schema-v2 receipts whose final JSON and video still match saved identity."""
+    if not isinstance(progress, dict):
+        return {}, {}
+    if progress.get("schema_version") != 2 or not isinstance(progress.get("rooms"), dict):
+        legacy = {key: value.get("count", 0) for key, value in progress.items()
+                  if isinstance(value, dict) and type(value.get("count")) is int}
+        return {}, legacy
+    staging = (Path(study_root) / "_staging").resolve()
+    verified = {}
+    raw_legacy = progress.get("legacy_counts", {})
+    legacy = ({str(key): value for key, value in raw_legacy.items()
+               if type(value) is int and value >= 0} if isinstance(raw_legacy, dict) else {})
+    for live_id, room in progress["rooms"].items():
+        if not isinstance(room, dict):
+            continue
+        if type(room.get("count")) is int and room["count"] >= 0:
+            legacy[live_id] = max(legacy.get(live_id, 0), room["count"])
+        identities = set()
+        for receipt in room.get("segments", []):
+            try:
+                final_path = Path(receipt["final_json"]).resolve()
+                video_path = Path(receipt["video_path"]).resolve()
+                if not final_path.is_relative_to(staging) or not video_path.is_relative_to(staging):
+                    continue
+                final_stat, video_stat = final_path.stat(), video_path.stat()
+                if ((final_stat.st_size, final_stat.st_mtime_ns) !=
+                        (receipt["final_size"], receipt["final_mtime_ns"]) or
+                        (video_stat.st_size, video_stat.st_mtime_ns) !=
+                        (receipt["video_size"], receipt["video_mtime_ns"])):
+                    continue
+                with final_path.open(encoding="utf-8") as stream:
+                    final = json.load(stream)
+                if (str(final.get("recording_id")) != str(receipt["recording_id"])
+                        or int(final.get("segment_index", -1)) != int(receipt["segment_index"])
+                        or video_path not in [Path(item).resolve() for item in final.get("recorded_files", [])]
+                        or float(final.get("video_duration_seconds", 0)) != float(receipt["video_duration_seconds"])):
+                    continue
+                identities.add(str(receipt["recording_id"]))
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+        verified[live_id] = len(identities)
+    return verified, legacy if isinstance(legacy, dict) else {}
+
+
+def archived_segment_counts(study_root):
+    """Count unique segments present in preserved, generated archive manifests."""
+    sessions = (Path(study_root) / "sessions").resolve()
+    counts = {}
+    if not sessions.is_dir():
+        return counts
+    for manifest_path in sessions.glob("*/archive_manifest.json"):
+        try:
+            with manifest_path.open(encoding="utf-8") as stream:
+                manifest = json.load(stream)
+            if manifest.get("source_preserved") is not True:
+                continue
+            live_id = str(manifest["room_id"])
+            recordings = counts.setdefault(live_id, set())
+            for item in manifest.get("entries", []):
+                if not isinstance(item, dict):
+                    continue
+                recording_id = str(item.get("recording_id", ""))
+                destination = Path(item["destination"]).resolve()
+                if (not recording_id or not destination.is_relative_to(sessions)
+                        or not destination.is_file() or destination.stat().st_size != item.get("bytes")):
+                    continue
+                recordings.add(recording_id)
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+    return {live_id: len(recordings) for live_id, recordings in counts.items()}
 
 
 def load_json(path, fallback):
@@ -83,6 +161,11 @@ def port_free(port):
         return False
 
 
+def compatible_existing_service(state, expected_root, expected_version):
+    return (isinstance(state, dict) and state.get("code_root") == str(expected_root)
+            and state.get("version") == expected_version)
+
+
 def existing_crawler_pids():
     """Read-only check includes legacy/delayed Python workers, before Edge opens."""
     if os.name != "nt":
@@ -108,11 +191,22 @@ class Manager:
         self.control = Path(control)
         self.control.mkdir(parents=True, exist_ok=True)
         self.settings_path = self.control / "settings.json"
-        self.settings = validate(load_json(self.settings_path, initial or defaults()))
+        base = validate(initial or defaults())
+        if self.settings_path.exists():
+            try:
+                saved = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise ValueError("设置文件无法读取；已保留原文件，请先检查或恢复备份") from error
+            self.settings = migrate_settings(saved, base)
+            if self.settings != saved:
+                atomic_json(self.settings_path, self.settings, backup=True)
+        else:
+            self.settings = base
         self.lock = threading.RLock()
         self.children = {}
         self.run = load_json(self.control / "active_run.json", {})
         self.check_cache = None
+        self._archive_cache = ("", 0, {})
 
     def save(self, config):
         with self.lock:
@@ -152,9 +246,25 @@ class Manager:
         rows = read_url_list(source, instance["segments"])
         progress = load_json(Path(config["study_root"]) / "_control" /
                              f"progress_{instance['port']}.json", {})
+        valid_counts, legacy_counts = verified_progress_counts(progress, config["study_root"])
+        archive_counts = self.archive_counts(config["study_root"])
         for row in rows:
-            row["count"] = max(row["count"], progress.get(row["live_id"], {}).get("count", 0))
+            live_id = row["live_id"]
+            progress_entry = progress.get("rooms", {}).get(live_id, {}) if isinstance(progress, dict) else {}
+            saved_count = progress_entry.get("count", 0) if isinstance(progress_entry, dict) else 0
+            row["count"] = max(row["count"], legacy_counts.get(live_id, 0), saved_count)
+            row["valid_count"] = valid_counts.get(live_id, 0)
+            row["archived_count"] = archive_counts.get(live_id, 0)
         return rows
+
+    def archive_counts(self, study_root):
+        now = time.monotonic()
+        root = str(Path(study_root).resolve())
+        if self._archive_cache[0] == root and now - self._archive_cache[1] < 30:
+            return self._archive_cache[2]
+        result = archived_segment_counts(study_root)
+        self._archive_cache = (root, now, result)
+        return result
 
     def jobs(self):
         jobs = []
@@ -305,7 +415,8 @@ class Manager:
 
     def state(self):
         with self.lock:
-            totals = {"rooms": 0, "completed_rooms": 0, "recorded_segments": 0, "remaining_segments": 0}
+            totals = {"rooms": 0, "completed_rooms": 0, "recorded_segments": 0,
+                      "remaining_segments": 0, "valid_segments": 0, "archived_segments": 0}
             instances = []
             distinct = {}
             jobs = self.jobs()
@@ -321,20 +432,29 @@ class Manager:
                                       progress_source="本次运行" if job else "当前设置"))
                 if instance["enabled"] or job:
                     for row in rows:
-                        previous = distinct.get(row["live_id"], {"count": 0, "target": 0})
-                        distinct[row["live_id"]] = {"count": max(previous["count"], row["count"]),
-                                                    "target": max(previous["target"], row["target"])}
+                        previous = distinct.get(row["live_id"], {"count": 0, "target": 0,
+                                                                   "valid_count": 0, "archived_count": 0})
+                        distinct[row["live_id"]] = {
+                            "count": max(previous["count"], row["count"]),
+                            "target": max(previous["target"], row["target"]),
+                            "valid_count": max(previous["valid_count"], row["valid_count"]),
+                            "archived_count": max(previous["archived_count"], row["archived_count"]),
+                        }
             totals["rooms"] = len(distinct)
             totals["completed_rooms"] = sum(r["count"] >= r["target"] for r in distinct.values())
+            totals["verified_rooms"] = sum(r["valid_count"] >= r["target"] for r in distinct.values())
             totals["recorded_segments"] = sum(r["count"] for r in distinct.values())
+            totals["valid_segments"] = sum(r["valid_count"] for r in distinct.values())
+            totals["archived_segments"] = sum(r["archived_count"] for r in distinct.values())
             totals["remaining_segments"] = sum(max(0, r["target"] - r["count"]) for r in distinct.values())
             totals["target_segments"] = sum(r["target"] for r in distinct.values())
-            totals["completed_segments"] = sum(min(r["count"], r["target"]) for r in distinct.values())
+            totals["completed_segments"] = sum(min(r["valid_count"], r["target"]) for r in distinct.values())
             totals["progress_percent"] = (round(totals["completed_segments"] * 100 / totals["target_segments"], 1)
                                           if totals["target_segments"] else 0)
             return {"settings": self.settings, "instances": instances, "totals": totals,
                     "jobs": jobs, "preflight": self.check_cache,
                     "version": VERSION, "code_root": str(ROOT),
+                    "server_pid": os.getpid(),
                     "run_id": self.run.get("run_id"), "server_time": time.time()}
 
     def log_tail(self, instance_id):
@@ -437,8 +557,19 @@ def main():
         try:
             with urlopen(origin + "/api/state", timeout=2) as response:
                 state = json.load(response)
-            if state.get("code_root") == str(ROOT) and state.get("version", "").endswith("-local-panel") and args.open:
+            server_pid = state.get("server_pid", load_json(CONTROL / "panel_server.json", {}).get("pid", "未知"))
+            if compatible_existing_service(state, ROOT, VERSION) and args.open:
                 webbrowser.open(origin)
+            elif args.open:
+                notice = (f"端口已有不同版本控制台：PID {server_pid}，版本 {state.get('version', '未知')}。\n"
+                          f"本次需要 {VERSION}。请先在旧面板请求停止并确认采集任务退出，再关闭旧控制台后重试。\n"
+                          "未连接旧服务，也未停止任何任务。")
+                if os.name == "nt":
+                    ctypes.windll.user32.MessageBoxW(None, notice, "采集控制台版本不匹配", 0x30)
+                try:
+                    print(notice)
+                except (AttributeError, OSError):
+                    pass
         except Exception:
             pass
         return

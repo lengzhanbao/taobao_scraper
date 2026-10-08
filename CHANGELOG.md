@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- 控制台升级到 2.4：端口已有服务必须版本与代码目录完全匹配才复用；旧版显示 PID 与安全切换说明。
+- 分离清单历史计数、文件凭据复核有效段、归档 manifest 段数；旧计数不再冒充有效进度。
+- 网址备份改为按完整 SHA256 去重，重复清单历史按直播 ID 归并；不自动清理不同历史版本。
+- 旧设置缺少已知字段时用默认值迁移并备份；未知字段或损坏设置明确报错且保留原件。
 - 数字人检测统一保留 `isDigitalAnchorLive` 的 true、false 和缺失三态；只把平台标记全 true 的段视为严格数字人段。
 - 汇总 CSV 增加段落与 room 层的全 true、含 false、缺失标记和段数；false 段标记为排除候选并保留原始证据。
 - 标题含“虚拟主播”或“智能主播”时按研究口径标记数字人，同时保留平台原始标记。

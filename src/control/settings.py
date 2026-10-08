@@ -78,6 +78,39 @@ def validate(config):
     return out
 
 
+def migrate_settings(config, base=None):
+    """Fill newly added settings from defaults while preserving recognized saved values."""
+    if not isinstance(config, dict):
+        raise ValueError("设置文件内容必须是对象")
+    base = base or defaults()
+    unknown = set(config) - set(base)
+    if unknown:
+        raise ValueError("设置文件含有当前版本不认识的字段：" + ", ".join(sorted(unknown)))
+    migrated = dict(base)
+    migrated.update(config)
+    saved_instances = config.get("instances", base["instances"])
+    if not isinstance(saved_instances, list):
+        raise ValueError("设置文件中的实例列表无效")
+    known_by_id = {row["id"]: row for row in base["instances"]}
+    saved_by_id = {}
+    for saved in saved_instances:
+        if not isinstance(saved, dict) or type(saved.get("id")) is not int or saved["id"] not in known_by_id:
+            raise ValueError("设置文件中的实例编号无效")
+        unknown_row = set(saved) - set(known_by_id[saved["id"]])
+        if unknown_row:
+            raise ValueError("实例设置含有当前版本不认识的字段：" + ", ".join(sorted(unknown_row)))
+        if saved["id"] in saved_by_id:
+            raise ValueError("设置文件中有重复的实例编号")
+        saved_by_id[saved["id"]] = saved
+    rows = []
+    for instance_id, defaults_for_row in known_by_id.items():
+        row = dict(defaults_for_row)
+        row.update(saved_by_id.get(instance_id, {}))
+        rows.append(row)
+    migrated["instances"] = rows
+    return validate(migrated)
+
+
 def read_url_list(path, target):
     """Deduplicate by liveId. Only canonical live URLs leave this function."""
     found = {}

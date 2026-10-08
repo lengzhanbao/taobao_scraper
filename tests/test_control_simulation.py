@@ -23,7 +23,7 @@ ARTIFACTS.mkdir(parents=True, exist_ok=False)
 os.environ["LIVE_STUDY_ROOT"] = str(ARTIFACTS / "study")
 
 from src.control.settings import defaults, validate, build_environment, read_url_list
-from src.control.server import Manager, handler_for, process_birth
+from src.control.server import Manager, handler_for, process_birth, verified_progress_counts, archived_segment_counts, compatible_existing_service
 from src.utils.safe_io import atomic_json, verified_copy, PortLock
 from src.crawler.recording import record_segment
 from src.crawler.runtime_control import pause_requested, wait_while_paused
@@ -294,8 +294,10 @@ class Checks(unittest.TestCase):
             manager.save(next_config)
             state = manager.state()
             self.assertEqual(state["totals"]["target_segments"], 6)
-            self.assertEqual(state["totals"]["completed_segments"], 2)
-            self.assertAlmostEqual(state["totals"]["progress_percent"], 33.3)
+            self.assertEqual(state["totals"]["recorded_segments"], 2)
+            self.assertEqual(state["totals"]["completed_segments"], 0)
+            self.assertEqual(state["totals"]["valid_segments"], 0)
+            self.assertEqual(state["totals"]["progress_percent"], 0)
             manager.set_paused(1, False)
             self.assertFalse(pause_requested(run["jobs"][0]["pause_file"]))
             self.assertTrue(Path(run["jobs"][0]["pause_file"]).exists())
@@ -374,9 +376,11 @@ class Checks(unittest.TestCase):
     def test_13_progress_caps_and_runtime_threshold(self):
         from src.control.server import summarize_rows
         self.assertEqual(summarize_rows([])["progress_percent"], 0)
-        summary = summarize_rows([{"count": 4, "target": 1}])
+        summary = summarize_rows([{"count": 4, "target": 1, "valid_count": 1, "archived_count": 1}])
         self.assertEqual(summary["recorded"], 4)
         self.assertEqual(summary["completed_segments"], 1)
+        self.assertEqual(summary["valid_segments"], 1)
+        self.assertEqual(summary["archived_segments"], 1)
         self.assertEqual(summary["progress_percent"], 100)
         import importlib
         from src.utils import config as runtime_config
@@ -389,6 +393,72 @@ class Checks(unittest.TestCase):
                         importlib.reload(runtime_config)
         finally:
             importlib.reload(runtime_config)
+
+    def test_15_progress_receipts_archives_and_legacy_counts(self):
+        folder = self.folder('verified_progress')
+        study = folder / 'study'
+        staging = study / '_staging' / 'browser_9223' / 'room_123' / '第一段' / 'attempt'
+        staging.mkdir(parents=True)
+        video = staging / 'video.flv'
+        video.write_bytes(b'synthetic video')
+        final_path = staging / 'segment_final.json'
+        final_payload = {'recording_id': 'rec-1', 'segment_index': 1,
+                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 60.0}
+        final_path.write_text(json.dumps(final_payload), encoding='utf-8')
+        final_stat, video_stat = final_path.stat(), video.stat()
+        progress = {'schema_version': 2, 'legacy_counts': {'123': 3}, 'rooms': {'123': {
+            'count': 3, 'segments': [{'recording_id': 'rec-1', 'segment_index': 1,
+                'final_json': str(final_path.resolve()), 'final_size': final_stat.st_size,
+                'final_mtime_ns': final_stat.st_mtime_ns, 'video_path': str(video.resolve()),
+                'video_size': video_stat.st_size, 'video_mtime_ns': video_stat.st_mtime_ns,
+                'video_duration_seconds': 60.0}]}}}
+        valid, legacy = verified_progress_counts(progress, study)
+        self.assertEqual(valid, {'123': 1})
+        self.assertEqual(legacy, {'123': 3})
+        video.write_bytes(b'changed synthetic video')
+        valid, _ = verified_progress_counts(progress, study)
+        self.assertEqual(valid, {'123': 0})
+        valid, legacy = verified_progress_counts({'123': {'count': 4}}, study)
+        self.assertEqual(valid, {})
+        self.assertEqual(legacy, {'123': 4})
+        valid, legacy = verified_progress_counts({'schema_version': 2, 'legacy_counts': ['bad'],
+                         'rooms': {'123': {'count': 3, 'segments': []}}}, study)
+        self.assertEqual(valid, {'123': 0})
+        self.assertEqual(legacy, {'123': 3})
+
+        sessions = study / 'sessions'
+        for dirname in ('session_a', 'session_b'):
+            archived_video = sessions / dirname / 'video.flv'
+            archived_video.parent.mkdir(parents=True, exist_ok=True)
+            archived_video.write_bytes(b'archived')
+            manifest = {'room_id': '123', 'source_preserved': True, 'entries': [
+                {'recording_id': 'rec-archived', 'destination': str(archived_video.resolve()),
+                 'bytes': archived_video.stat().st_size},
+                {'recording_id': 'missing', 'destination': str((sessions / 'absent.flv').resolve()), 'bytes': 4},
+            ]}
+            (archived_video.parent / 'archive_manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+        self.assertEqual(archived_segment_counts(study), {'123': 1})
+
+    def test_16_crawler_validation_receipt_links_final_and_video(self):
+        folder = self.folder('receipt_builder')
+        room = folder / 'room_123'
+        segment = room / '第一段' / 'attempt'
+        segment.mkdir(parents=True)
+        video = segment / 'video.flv'
+        video.write_bytes(b'synthetic')
+        final = segment / 'capture_final.json'
+        final.write_text(json.dumps({'recording_id': 'rec-123', 'segment_index': 1,
+                         'recorded_files': [str(video.resolve())], 'video_duration_seconds': 42.5}), encoding='utf-8')
+        tree = ast.parse((ROOT / 'src' / 'crawler' / 'taobao_crawler.py').read_text(encoding='utf-8'))
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == 'validation_receipt')
+        namespace = {'Path': Path, 'json': json}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), 'synthetic_receipt_builder', 'exec'), namespace)
+        receipt = namespace['validation_receipt'](room, 1)
+        self.assertEqual(receipt['recording_id'], 'rec-123')
+        self.assertEqual(receipt['video_size'], video.stat().st_size)
+        self.assertEqual(receipt['final_json'], str(final.resolve()))
+        self.assertIsNone(namespace['validation_receipt'](room, 2))
 
     def test_14_readonly_cookie_flag(self):
         folder = self.folder("cookie_guard")

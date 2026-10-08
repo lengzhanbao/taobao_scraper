@@ -24,11 +24,11 @@ class Element {
 const instance = (id,target,completed,recorded=completed)=>({id,port:9222+id,urls_file:`urls_${id}.txt`,
   enabled:target>0,segments:target||3,rooms:target?1:0,complete:target&&completed===target?1:0,
   recorded,remaining:target-completed,target_segments:target,completed_segments:completed,progress_source:"本次运行"});
-const fixture = {token:"synthetic",version:"2.2-local-panel",code_root:"synthetic",preflight:null,
+const fixture = {token:"synthetic",version:"2.4-local-panel",code_root:"synthetic",preflight:null,
   settings:{study_root:"synthetic",python:"python",edge:"edge",ffmpeg:"ffmpeg",ffprobe:"ffprobe",
     max_minutes:1,cooldown_minutes:120,batch_rooms:1,launch_gap_seconds:0,instances:[]},
   instances:[instance(1,3,1),instance(2,1,1,4),instance(3,0,0),instance(4,0,0),instance(5,0,0)],
-  totals:{rooms:2,completed_rooms:1,recorded_segments:5,remaining_segments:2,target_segments:4,completed_segments:2},
+  totals:{rooms:2,completed_rooms:1,recorded_segments:5,valid_segments:2,archived_segments:1,remaining_segments:2,target_segments:4,completed_segments:2},
   jobs:[{instance_id:1,alive:true,phase:"paused",pause_supported:true,pause_requested:true,status:{}},
     {instance_id:2,alive:true,phase:"recording",pause_supported:true,pause_requested:false,
       status:{live_id:"123",segment_index:1,elapsed_seconds:45,planned_duration_seconds:60}}]};
@@ -47,9 +47,11 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/control/web/app.js")
 async function main() {
   await vm.runInContext("refresh()",context);
   assert.equal(elements.get("total-progress").value,50);
-  assert.match(elements.get("total-progress-text").textContent,/2 \/ 4 段/);
+  assert.equal(elements.get("verified").textContent,"2");
+  assert.equal(elements.get("archived").textContent,"1");
+  assert.match(elements.get("total-progress-text").textContent,/2 \/ 4 有效段/);
   const rows=elements.get("instance-rows").children;
-  assert.match(rows[1].children[4].textContent,/1 \/ 1 段 · 100.0%/);
+  assert.match(rows[1].children[4].textContent,/1 \/ 1 有效段 · 100.0%/);
   assert.equal(rows[1].children[6].children[0].children[1].value,75);
   assert.match(rows[1].children[6].textContent,/0:45 \/ 上限 1:00/);
   assert.equal(rows[0].children[7].children[0].dataset.operation,"resume");
@@ -70,7 +72,7 @@ async function main() {
   await vm.runInContext("refresh()",context);
   assert.equal(elements.get("total-progress").value,0);
   assert.equal(vm.runInContext("percent(7,3)",context),100);
-  fixture.version='2.3-local-panel';
+  fixture.version='2.4-local-panel';
   await vm.runInContext("refresh()",context);
   elements.get('url-instance').value='1';
   elements.get('url-load').listeners.click();

@@ -355,7 +355,33 @@ def record_room(url, live_id, room_dir, surl, seg_name, segment_index):
         page=page, log=log, publish_status=publish_status,
     )
 
-def mark_recorded(lid, count, total):
+def validation_receipt(room_dir, segment_index):
+    """Return file identity metadata for a segment accepted by record_segment."""
+    root = Path(room_dir).resolve()
+    candidates = []
+    for final_path in root.rglob("*_final.json"):
+        try:
+            with final_path.open(encoding="utf-8") as stream:
+                final = json.load(stream)
+            if int(final.get("segment_index", -1)) != int(segment_index):
+                continue
+            video_path = Path(final["recorded_files"][0]).resolve()
+            if not video_path.is_relative_to(root) or not video_path.is_file():
+                continue
+            final_stat, video_stat = final_path.stat(), video_path.stat()
+            candidates.append({
+                "segment_index": int(segment_index), "recording_id": str(final["recording_id"]),
+                "final_json": str(final_path.resolve()), "final_size": final_stat.st_size,
+                "final_mtime_ns": final_stat.st_mtime_ns, "video_path": str(video_path),
+                "video_size": video_stat.st_size, "video_mtime_ns": video_stat.st_mtime_ns,
+                "video_duration_seconds": float(final["video_duration_seconds"]),
+            })
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            continue
+    return max(candidates, key=lambda item: item["final_mtime_ns"]) if candidates else None
+
+
+def mark_recorded(lid, count, total, room_dir=None):
     """更新 urls 计数：先每日备份一次，再原子写入（临时文件+os.replace），防崩溃损坏"""
     path = URLS_FILE
     lines = open(path, encoding="utf-8").readlines()
@@ -387,8 +413,23 @@ def mark_recorded(lid, count, total):
         if os.path.isfile(progress_path):
             with open(progress_path, encoding="utf-8") as progress_file:
                 progress = json.load(progress_file)
-        progress[str(lid)] = {"count": count, "target": total, "updated_t": time.time()}
-        atomic_json(progress_path, progress, backup=True)
+        if progress.get("schema_version") == 2 and isinstance(progress.get("rooms"), dict):
+            rooms = progress["rooms"]
+            legacy_counts = progress.get("legacy_counts", {})
+        else:
+            rooms = {}
+            legacy_counts = {key: value.get("count", 0) for key, value in progress.items()
+                             if isinstance(value, dict) and type(value.get("count")) is int}
+        previous = rooms.get(str(lid), {})
+        segments = {item.get("recording_id"): item for item in previous.get("segments", [])
+                    if isinstance(item, dict) and item.get("recording_id")}
+        receipt = validation_receipt(room_dir, count) if room_dir else None
+        if receipt:
+            segments[receipt["recording_id"]] = receipt
+        rooms[str(lid)] = {"count": count, "target": total, "updated_t": time.time(),
+                           "segments": list(segments.values())}
+        atomic_json(progress_path, {"schema_version": 2, "rooms": rooms,
+                                    "legacy_counts": legacy_counts}, backup=False)
 
 def finalize_room(lid):
     """Copy and verify a full room as part of a batch. Keep all staging sources."""
@@ -657,7 +698,7 @@ while True:
 
     if ok:
         new_count = count + 1
-        mark_recorded(lid, new_count, total)
+        mark_recorded(lid, new_count, total, room_dir)
         elapsed = time.time() - rec_start_t
         if elapsed < MAX_MIN * 60:
             pad = MAX_MIN * 60 - elapsed

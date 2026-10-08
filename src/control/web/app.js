@@ -49,7 +49,8 @@ function renderInstances() {
     tr.children[3].textContent=i.complete+" / "+i.rooms;
     const target=i.target_segments??(i.recorded+i.remaining);
     const completed=i.completed_segments??Math.min(i.recorded,target);
-    tr.children[4].replaceChildren(progressBlock(completed,target,completed+" / "+target+" 段 · "+percent(completed,target).toFixed(1)+"%"));
+    const valid=i.valid_segments??0;
+    tr.children[4].replaceChildren(progressBlock(i.completed_segments??Math.min(valid,target),target,(i.completed_segments??Math.min(valid,target))+" / "+target+" 有效段 · "+percent(i.completed_segments??Math.min(valid,target),target).toFixed(1)+"%"));
     if(i.progress_source) {const note=document.createElement("small");note.textContent=i.progress_source;tr.children[4].append(note);}
     const job=state.jobs.find(j=>j.instance_id===i.id);
     const label=document.createElement("span");label.className="job-phase"+(job?.alive&&job.phase!=="paused"?" running":"");label.textContent=job?(phaseNames[job.phase]||job.phase):"未启动";
@@ -82,11 +83,12 @@ async function refresh() {
   if(!dirty) fillSettings();
   renderInstances();renderChecks(state.preflight);
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
+  $("verified").textContent=state.totals.valid_segments??0;$("archived").textContent=state.totals.archived_segments??0;
   const target=state.totals.target_segments??(state.totals.recorded_segments+state.totals.remaining_segments);
   const completed=state.totals.completed_segments??Math.min(state.totals.recorded_segments,target);
   const totalPercent=percent(completed,target);
   $("total-progress").value=totalPercent;
-  $("total-progress-text").textContent=completed+" / "+target+" 段 · "+totalPercent.toFixed(1)+"%";
+  $("total-progress-text").textContent=completed+" / "+target+" 有效段 · "+totalPercent.toFixed(1)+"%";
   const alive=state.jobs.filter(j=>j.alive).length;
   const paused=state.jobs.filter(j=>j.alive&&j.phase==="paused").length;
   $("run-status").textContent=alive?alive+" 个实例在线"+(paused?" · "+paused+" 个已暂停":""):"采集未运行";
@@ -94,7 +96,8 @@ async function refresh() {
   $("run-detail").textContent=alive?"修改设置将在下次启动时生效":"保存设置后即可启动";
   $("code-root").textContent="版本目录："+state.code_root;
   $("version").textContent="v"+state.version.split("-")[0];
-  const urlSupported=Number(state.version.split("-")[0])>=2.3;
+  const versionParts=state.version.match(/^(\d+)\.(\d+)/);
+  const urlSupported=Boolean(versionParts&&(Number(versionParts[1])>2||(Number(versionParts[1])===2&&Number(versionParts[2])>=3)));
   $("url-load").disabled=!urlSupported||busy;
   $("url-reload").disabled=!urlSupported||busy;
   $("url-save").disabled=!urlSupported||busy||!urlDocument;
@@ -135,7 +138,7 @@ function showUrlDocument(result) {
   $("url-note").textContent="已加载 · 保存会保留原文件备份";
   $("url-count").textContent=result.rows.length+" 间";
   $("url-rows").replaceChildren();
-  for(const row of result.rows) {const tr=document.createElement("tr");tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.count>=row.target?"已满段":"待录制"));$("url-rows").append(tr);}
+  for(const row of result.rows) {const tr=document.createElement("tr");tr.append(cell(row.live_id),cell(row.count+" / "+row.target),cell(row.valid_count||0),cell(row.archived_count||0),cell(row.count>=row.target?"历史计数已满":"待录制"));$("url-rows").append(tr);}
   const elsewhere=new Map();
   // Cross-instance duplicates are also checked authoritatively before starting.
   for(const i of state.instances) if(i.id!==result.instance_id&&i.rooms)elsewhere.set(i.id,i.rooms);

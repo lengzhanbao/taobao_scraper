@@ -17,17 +17,18 @@
     <div class="side-bottom"><span class="dot green"></span> 本机运行 <p>数字人直播研究</p><small>原始视频和 JSON 持续保留</small></div>
   </aside>
   <main id="overview">
-    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">v2.2</span></div></header>
+    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">v2.4</span></div></header>
     <section class="heading"><div><div class="eyebrow">COLLECTION WORKSPACE</div><h1>淘宝直播采集控制台</h1><p>设置录制节奏，查看进度，集中管理采集任务。</p></div><div class="actions"><button id="check">检查环境</button><button id="start" class="primary">▶ 启动采集</button></div></section>
     <div id="message" role="status" aria-live="polite" class="message" hidden></div>
     <div class="status-strip"><span class="dot" id="run-dot"></span><strong id="run-status">读取状态中</strong><span id="run-detail">参数只在下一次启动时生效</span><button id="stop" class="text-button" disabled>录完当前段后停止</button></div>
     <section class="metrics">
       <article><span>直播间 · 启用实例</span><strong id="rooms">—</strong><small>按链接清单去重统计</small></article>
-      <article><span>已达到目标段数</span><strong id="completed">—</strong><small>依据清单与新版录制进度</small></article>
-      <article><span>已录制段数</span><strong id="recorded">—</strong><small>旧清单计数尚未重新验证</small></article>
-      <article><span>待录制段数</span><strong id="remaining">—</strong><small>按当前设置计算</small></article>
+      <article><span>历史计数达到目标房间</span><strong id="completed">—</strong><small>来自网址清单或历史进度文件</small></article>
+      <article><span>清单历史计数段数</span><strong id="recorded">—</strong><small>旧计数保留，未自动当作有效验证</small></article>
+      <article><span>历史计数剩余目标段</span><strong id="remaining">—</strong><small>按历史计数作为续录位置计算</small></article>
     </section>
-    <section class="collection-progress" aria-label="整体录制进度"><div><strong>整体录制进度</strong><span id="total-progress-text">读取中</span></div><progress id="total-progress" max="100" value="0" aria-label="已完成目标段数百分比"></progress><small>成功录制并通过视频校验的段落才增加进度；旧清单计数沿用原记录。</small></section>
+    <div class="verification-strip"><article><span>有效段数</span><strong id="verified">—</strong><small>新版本保留校验文件凭据；旧计数不计入</small></article><article><span>已归档段数</span><strong id="archived">—</strong><small>基于归档清单中的校验文件</small></article></div>
+    <section class="collection-progress" aria-label="整体录制进度"><div><strong>有效录制进度</strong><span id="total-progress-text">读取中</span></div><progress id="total-progress" max="100" value="0" aria-label="已验证有效段数百分比"></progress><small>新版录制须通过视频与最终 JSON 文件校验才计入；旧版历史计数单独显示，不参与此进度。</small></section>
     <section class="workflow" aria-label="操作步骤"><a href="#urls"><b>1</b> 添加直播网址</a><a href="#settings"><b>2</b> 设置录制节奏</a><a href="#environment"><b>3</b> 检查并启动</a><a href="#instances"><b>4</b> 查看进度 / 暂停</a></section>
     <section class="card" id="urls">
       <div class="card-header"><div><h2>直播网址管理</h2><p>直接编辑 urls.txt 清单；每个实例有独立清单，不需要打开文件夹。</p></div><span class="tag">自动去重 · 保存前备份</span></div>
@@ -36,7 +37,7 @@
         <p id="url-path" class="file-path">加载后显示网址文件位置</p>
         <div class="url-editor-grid"><div><label for="url-text">采集清单 · 每行一个淘宝直播链接或直播 ID</label><textarea id="url-text" rows="10" spellcheck="false" placeholder="https://tbzb.taobao.com/live?liveId=123456789&#10;也可以粘贴旧清单，已录制计数会保留。"></textarea><div class="editor-footer"><span id="url-note" role="status">先加载对应实例的清单</span><button id="url-save" class="primary" disabled>保存清单</button></div></div>
           <div class="url-add"><h3>批量追加网址</h3><p>追加到已保存清单；同一直播 ID 自动合并，不重置已录制段数。</p><textarea id="url-add-text" rows="5" spellcheck="false" aria-label="追加网址" placeholder="把新网址粘贴到这里，每行一个"></textarea><button id="url-append" disabled>添加到这个实例</button><p class="hint">编辑清单时移出的行会保留为停用历史；原文件另有完整备份。运行期间保存，下一次启动生效。</p></div></div>
-        <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>已录制 / 目标</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
+        <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>历史计数 / 目标</th><th>有效段</th><th>已归档段</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
       </div>
     </section>
     <div class="workspace-grid">
@@ -66,7 +67,7 @@
       </section>
     </div>
     <section class="card" id="instances"><div class="card-header"><div><h2>实例与采集进度</h2><p>启用开关和目标段数在下次启动生效；暂停 / 继续独立控制当前实例，暂停等当前段录完后生效。</p></div><span class="tag muted" id="enabled-count">5 个实例</span></div>
-      <div class="table-scroll"><table><thead><tr><th>下次启用</th><th>浏览器实例</th><th>每房间段数</th><th>房间完成 / 总数</th><th>段落录制进度</th><th>运行状态</th><th>当前录制</th><th>实例控制</th></tr></thead><tbody id="instance-rows"></tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>下次启用</th><th>浏览器实例</th><th>每房间段数</th><th>历史计数满段 / 总数</th><th>有效段进度</th><th>运行状态</th><th>当前录制</th><th>实例控制</th></tr></thead><tbody id="instance-rows"></tbody></table></div>
     </section>
     <section class="card" id="environment"><div class="card-header"><div><h2>环境检查</h2><p>启动前自动检查依赖、磁盘空间、链接和端口。</p></div><span id="check-time" class="small muted-text">尚未检查</span></div><div id="checks" class="checks-empty">点击上方“检查环境”查看结果。</div></section>
     <section class="card" id="logs"><div class="card-header"><div><h2>运行日志</h2><p>仅显示由这个控制台启动的任务</p></div><div class="log-actions"><label for="log-instance">实例</label><select id="log-instance"><option value="1">Edge 1</option><option value="2">Edge 2</option><option value="3">Edge 3</option><option value="4">Edge 4</option><option value="5">Edge 5</option></select><button id="refresh-log">刷新</button></div></div><pre id="log-content">暂无本次运行日志。</pre></section>

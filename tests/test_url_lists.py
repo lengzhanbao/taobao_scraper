@@ -1,5 +1,6 @@
 """Synthetic URL management checks. Never touch research input files."""
 import hashlib
+import json
 from pathlib import Path
 import unittest
 import uuid
@@ -54,6 +55,19 @@ class UrlListsTests(unittest.TestCase):
         self.assertEqual(read_url_list(self.path, 3), [])
         self.assertIn('liveId=123', result['text'])
 
+    def test_repeated_save_deduplicates_history_and_backups(self):
+        self.path.write_text('https://tbzb.taobao.com/live?liveId=123,已录制2/3\n', encoding='utf-8')
+        document = inspect(self.path, 3)
+        saved = save_list(self.path, 3, '456', document['revision'])
+        first_backup = saved['backup']
+        saved = save_list(self.path, 3, '456', saved['revision'])
+        self.assertIsNone(saved['backup'])
+        self.assertEqual(len(list(self.root.glob('urls_1.txt.bak_*'))), 1)
+        saved = save_list(self.path, 3, '456', saved['revision'])
+        self.assertEqual(len(list(self.root.glob('urls_1.txt.bak_*'))), 1)
+        self.assertEqual(saved['text'].count('liveId=123'), 1)
+        self.assertTrue(Path(first_backup).is_file())
+
     def test_manager_uses_configured_file_only(self):
         manager = Manager(defaults(self.root / 'study'), control=self.root / 'control')
         document = manager.url_document(1)
@@ -64,3 +78,44 @@ class UrlListsTests(unittest.TestCase):
         for identifier in (0, 6, True, '../other'):
             with self.assertRaises(ValueError):
                 manager.url_document(identifier)
+
+    def test_settings_migration_fills_new_known_fields_and_backs_up(self):
+        initial = defaults(self.root / 'study')
+        control = self.root / 'control'
+        control.mkdir()
+        saved = {key: value for key, value in initial.items() if key != 'launch_gap_seconds'}
+        saved['max_minutes'] = 13
+        saved['instances'] = [{key: value for key, value in row.items() if key != 'segments'}
+                              for row in saved['instances'][:2]]
+        settings_path = control / 'settings.json'
+        settings_path.write_text(json.dumps(saved), encoding='utf-8')
+        manager = Manager(initial, control=control)
+        self.assertEqual(manager.settings['launch_gap_seconds'], initial['launch_gap_seconds'])
+        self.assertEqual(manager.settings['max_minutes'], 13)
+        self.assertEqual([row['segments'] for row in manager.settings['instances']], [3, 3, 3, 4, 3])
+        backups = list(control.glob('settings.json.bak_*'))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(json.loads(backups[0].read_text(encoding='utf-8')), saved)
+
+    def test_settings_unknown_or_corrupt_file_is_retained(self):
+        initial = defaults(self.root / 'study')
+        control = self.root / 'control'
+        control.mkdir()
+        settings_path = control / 'settings.json'
+        saved = dict(initial, unexpected=True)
+        settings_path.write_text(json.dumps(saved), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '不认识'):
+            Manager(initial, control=control)
+        self.assertEqual(json.loads(settings_path.read_text(encoding='utf-8')), saved)
+        settings_path.write_text('{ broken', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '保留原文件'):
+            Manager(initial, control=control)
+        self.assertEqual(settings_path.read_text(encoding='utf-8'), '{ broken')
+
+    def test_strict_version_gate(self):
+        from src.control.server import compatible_existing_service
+        state = {'code_root': 'E:/app', 'version': '2.1-local-panel'}
+        self.assertFalse(compatible_existing_service(state, 'E:/app', '2.4-local-panel'))
+        state['version'] = '2.4-local-panel'
+        self.assertTrue(compatible_existing_service(state, 'E:/app', '2.4-local-panel'))
+        self.assertFalse(compatible_existing_service(state, 'E:/other', '2.4-local-panel'))
