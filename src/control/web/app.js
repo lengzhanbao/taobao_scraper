@@ -89,7 +89,7 @@ async function refresh() {
     latest=await api("/api/state");
   } catch(error) {
     refreshFailures+=1;
-    if(refreshFailures===1) $("connection-state").textContent="连接失败，正在重试";
+    if(refreshFailures===1) {$("connection-state").textContent="连接失败，正在重试";$("connection-state").className="connection-warning";}
     if(refreshFailures>=2) {
       connectionLost=true;
       $("connection-state").textContent="控制台连接中断";$("connection-state").className="connection-error";
