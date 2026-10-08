@@ -10,7 +10,10 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from src.utils.config import STUDY_ROOT
+from src.utils.config import STUDY_ROOT, FFPROBE
+from src.utils.safe_io import atomic_json, verified_copy, probe_video
+from pathlib import Path
+import uuid
 from src.utils.digital_flags import (
     classify_digital_segment, find_values_by_key,
     summarize_digital_flags, summarize_room_digital_flags,
@@ -93,6 +96,8 @@ def write_csv(path, rows, fieldnames, overwrite=False):
             deduped.append(r)
             new_tags.add(tag)
     all_rows = existing + deduped
+    if os.path.isfile(path):
+        shutil.copy2(path, path + ".bak_" + uuid.uuid4().hex)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -107,10 +112,22 @@ def process_room(room_dir):
         for f in filenames:
             if f.startswith("data_") and f.endswith("_final.json"):
                 files.append(os.path.join(root, f))
-    files.sort(key=os.path.getmtime)
+    def recording_order(path):
+        with open(path, encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        return (metadata.get("segment_index", 0), metadata.get("record_start_t", 0), os.path.basename(path))
+    files.sort(key=recording_order)
     if not files:
         print("  无 _final.json")
-        return
+        return False
+    seen_indexes = set()
+    for fp in files:
+        with open(fp, encoding="utf-8") as stream:
+            index = json.load(stream).get("segment_index")
+        if index is not None:
+            if index in seen_indexes:
+                raise ValueError(f"重复有效段编号 {index}，保留原文件，需先核对录制进度")
+            seen_indexes.add(index)
 
     # —— 从第一个文件提取店铺名 ——
     first = json.load(open(files[0], encoding="utf-8"))
@@ -136,10 +153,10 @@ def process_room(room_dir):
     raw_dir = os.path.join(SESSIONS, pair_str, "raw")
     os.makedirs(raw_dir, exist_ok=True)
     copied = []
+    archive_entries = []
     for fp in files:
         dst = os.path.join(raw_dir, os.path.basename(fp))
-        if not os.path.exists(dst):
-            shutil.copy2(fp, dst)
+        archive_entries.append(verified_copy(fp, dst))
         copied.append(dst)
     print(f"  复制 {len(copied)} 个JSON到 {raw_dir}")
 
@@ -365,16 +382,23 @@ def process_room(room_dir):
         vid_dir = os.path.join(sess_dir, "video")
         os.makedirs(vid_dir, exist_ok=True)
         seg_dir = os.path.dirname(files[fi])  # 原始staging段目录
-        for sf in os.listdir(seg_dir):
-            if sf.endswith(".flv"):
-                src = os.path.join(seg_dir, sf)
-                if os.path.getsize(src) == 0: continue
-                dst = os.path.join(vid_dir, f"{base_name}_video_第{fi+1}段.flv")
-                if not os.path.exists(dst):
-                    shutil.copy2(src, dst)
-                if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
-                    print(f"    📹 第{fi+1}段: {os.path.getsize(dst)/1024/1024:.0f}MB")
-                break  # 每段只有一个FLV
+        source_candidates = data.get("recorded_files", [])
+        if not source_candidates:
+            source_candidates = [os.path.join(seg_dir, sf) for sf in os.listdir(seg_dir) if sf.endswith(".flv")]
+        if len(source_candidates) != 1:
+            raise ValueError("每个有效段必须明确对应一个视频文件")
+        src = Path(source_candidates[0]).resolve()
+        if not src.is_file():
+            src = (Path(seg_dir) / src.name).resolve()
+        if not src.is_relative_to(Path(room_dir).resolve()) or not src.is_file() or src.stat().st_size == 0:
+            raise ValueError("视频缺失或路径超出本房间，保留原始数据")
+        duration = probe_video(src, FFPROBE)
+        dst = os.path.join(vid_dir, f"{base_name}_video_第{fi+1}段.flv")
+        entry = verified_copy(src, dst)
+        entry.update(segment_index=data.get("segment_index", fi + 1),
+                     recording_id=data.get("recording_id", tag), duration_seconds=duration)
+        archive_entries.append(entry)
+        print(f"    📹 第{fi+1}段: {duration:.1f}秒，SHA256 校验通过")
 
     # 汇总CSV
     if rows:
@@ -423,22 +447,27 @@ def process_room(room_dir):
         )
         print(f"  汇总: lives_summary_{pair_str}.csv ({len(rows)}行)")
 
-    # 验证全部 FLV 复制成功
-    vid_dir = os.path.join(SESSIONS, pair_str, "video")
-    total_segs = len(files)
-    copied_flv = sum(1 for f in os.listdir(vid_dir) if f.endswith(".flv")) if os.path.isdir(vid_dir) else 0
-    if copied_flv == total_segs:
-        print(f"  VIDEO_COPY_OK: {copied_flv}/{total_segs}")
-    else:
-        print(f"  VIDEO_COPY_FAIL: {copied_flv}/{total_segs}")
-
+    # Evidence is per file, including source identity/hash, rather than a folder count.
+    sess_dir = os.path.join(SESSIONS, pair_str)
+    for index in range(1, len(files) + 1):
+        comments = os.path.join(sess_dir, "crawler", f"comments_第{index}段_{pair_str}.csv")
+        if not os.path.isfile(comments):
+            raise ValueError("缺少段落弹幕 CSV")
+    if not rows or not os.path.isfile(sp) or len(archive_entries) != 2 * len(files):
+        raise ValueError("归档文件不完整")
+    atomic_json(os.path.join(sess_dir, "archive_manifest.json"),
+                {"room_id": live_id, "segment_count": len(files), "entries": archive_entries,
+                 "source_preserved": True}, backup=True)
+    print(f"  ARCHIVE_COPY_OK: {len(files)} 段，逐文件校验，源文件保留")
     print(f"  文件夹: {pair_str}")
+    return True
 
 
 def main():
     import sys
     if len(sys.argv) > 1:
-        process_room(sys.argv[1])
+        if not process_room(sys.argv[1]):
+            raise SystemExit(1)
         return
 
     # 全量模式：遍历 _staging/browser_*/room_*/*_final.json

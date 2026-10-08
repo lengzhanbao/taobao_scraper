@@ -34,6 +34,7 @@ FFMPEG = _get_env_path(
     "LIVE_FFMPEG",
     os.path.join(BASE_DIR, "DouyinLiveRecorder_v4.0.7", "ffmpeg", "ffmpeg.exe")
 )
+FFPROBE = _get_env_path("LIVE_FFPROBE", os.path.join(os.path.dirname(FFMPEG), "ffprobe.exe"))
 
 # Python executable
 PYTHON = _get_env_path("LIVE_PYTHON", "python")
@@ -49,7 +50,9 @@ PLAYWRIGHT_CORE_PATH = os.environ.get("LIVE_PLAYWRIGHT_CORE_PATH", None)
 
 # Crawler tuning (override via environment variables)
 MAX_MIN = _get_env_int("LIVE_MAX_MIN", 20)              # minutes recorded per segment
-MAX_ROUND = _get_env_int("LIVE_MAX_ROUND", 3)           # segments per room (urls_4 uses 4 in file)
+MAX_ROUND = _get_env_int("LIVE_MAX_ROUND", 3)
+MAX_ROUND_OVERRIDE = os.environ.get("LIVE_MAX_ROUND_OVERRIDE") == "1"
+BATCH_ROOMS = max(6, _get_env_int("LIVE_BATCH_ROOMS", 6))
 COOLDOWN_SEC = _get_env_int("LIVE_COOLDOWN_SEC", 120 * 60)
 PRODUCT_MIN_SEC = _get_env_int("LIVE_PRODUCT_MIN_SEC", 0)
 MAX_COLLECTED = _get_env_int("LIVE_MAX_COLLECTED", 800)

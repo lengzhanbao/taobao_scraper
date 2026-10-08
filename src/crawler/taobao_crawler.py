@@ -19,21 +19,21 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DELAY = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-if DELAY:
-    print(f"⏳ 延迟 {DELAY}s 启动..."); time.sleep(DELAY)
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import (
-    STUDY_ROOT, FFMPEG, EDGE_PATH,
+    STUDY_ROOT, FFMPEG, FFPROBE, EDGE_PATH,
     MAX_MIN, MAX_ROUND, COOLDOWN_SEC, PRODUCT_MIN_SEC,
-    MAX_COLLECTED, SEG_NAMES, USER_AGENT,
+    MAX_COLLECTED, SEG_NAMES, USER_AGENT, MAX_ROUND_OVERRIDE, BATCH_ROOMS,
 )
+from pathlib import Path
+from src.utils.safe_io import atomic_json, probe_video, PortLock
 from src.utils.digital_flags import (
     find_values_by_key, parse_json_body,
     summarize_digital_flags, title_keywords_in_values,
 )
-URLS_FILE = os.path.join(STUDY_ROOT, "_config", sys.argv[1])
+URLS_FILE = os.environ.get("LIVE_URLS_FILE", os.path.join(STUDY_ROOT, "_config", sys.argv[1]))
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
 OUTDIR = os.path.join(STUDY_ROOT, "_staging", f"browser_{PORT}")
@@ -41,46 +41,44 @@ COOKIE_TXT = os.path.join(STUDY_ROOT, "_config", f"taobao_cookies_{PORT}.txt")
 UA = USER_AGENT
 
 os.makedirs(OUTDIR, exist_ok=True)
+port_lock = PortLock(os.path.join(STUDY_ROOT, "_control", f"port_{PORT}.lock"))
+STATUS_FILE = os.environ.get("LIVE_STATUS_FILE")
+STOP_FILE = os.environ.get("LIVE_STOP_FILE")
+RUN_ID = os.environ.get("LIVE_RUN_ID", "manual")
+status_data = {"pid": os.getpid(), "port": PORT, "run_id": RUN_ID}
 
-# 启动时清理残留垃圾（无 _final.json 的目录全删）
+
+def publish_status(phase, **fields):
+    status_data.update(fields)
+    status_data.update(phase=phase, updated_t=time.time())
+    if STATUS_FILE:
+        try:
+            atomic_json(STATUS_FILE, status_data)
+        except OSError as error:
+            print(f"状态写入失败: {error}", flush=True)
+
+
+def stop_requested():
+    return bool(STOP_FILE and os.path.isfile(STOP_FILE))
+
+
+def interruptible_wait(seconds):
+    deadline = time.monotonic() + max(0, seconds)
+    while time.monotonic() < deadline and not stop_requested():
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+# 启动时只报告未完成目录，保留所有原文件。
 def clean_staging():
-    if os.path.isdir(OUTDIR):
-        for d in os.listdir(OUTDIR):
-            dpath = os.path.join(OUTDIR, d)
-            if not os.path.isdir(dpath) or not d.startswith("room_"):
-                continue
-            for seg in os.listdir(dpath):
-                sp = os.path.join(dpath, seg)
-                if not os.path.isdir(sp):
-                    continue
-                if any(f.endswith("_final.json") for f in os.listdir(sp)):
-                    continue
-                # seg-level: flv >= 50MB (~7min) valid -> rename keep; else delete whole seg
-                valid_flv = False
-                any_data = False
-                for f in os.listdir(sp):
-                    fp = os.path.join(sp, f)
-                    if f.lower().endswith(".flv") and "待删除" not in f:
-                        any_data = True
-                        try:
-                            if os.path.getsize(fp) >= 50 * 1024 * 1024:
-                                valid_flv = True
-                        except OSError:
-                            pass
-                    if f.startswith("data_"):
-                        any_data = True
-                if valid_flv:
-                    try:
-                        os.rename(sp, sp + ".待清理")
-                        log("[clean] keep valid incomplete seg: " + seg)
-                    except Exception:
-                        pass
-                elif any_data:
-                    import shutil
-                    shutil.rmtree(sp, ignore_errors=True)
-                    log("[clean] remove <7min seg: " + seg)
+    """Report interrupted attempts; preserve every original path and file."""
+    incomplete = 0
+    for root, dirs, files in os.walk(OUTDIR):
+        if any(f.endswith(".flv") for f in files) and not any(f.endswith("_final.json") for f in files):
+            incomplete += 1
+    if incomplete:
+        log(f"发现 {incomplete} 个未完成录制目录，全部保留，不自动清理")
 
-state = {"collected": [], "stream_url": {"url": None}}
+state = {"collected": [], "stream_url": {"url": None}, "sequence": 0, "journal": None}
+capture_lock = threading.Lock()
 
 
 # 控制台编码兜底：输出重定向到文件时 Python 会退回 GBK，emoji 日志会崩
@@ -183,10 +181,12 @@ def listen_loop():
         if "live.detail.get" in url:
             try:
                 body = resp.response.body
-                if isinstance(body, str):
-                    m = re.search(r'"liveUrl"\s*:\s*"([^"]+)"', body)
-                    if m:
-                        state["stream_url"]["url"] = m.group(1)
+                parsed = parse_json_body(body)
+                streams = find_values_by_key(parsed, "liveUrl")
+                response_ids = [str(v) for v in find_values_by_key(parsed, "liveId")]
+                if streams and state.get("live_id") in response_ids:
+                    if isinstance(streams[0], str):
+                        state["stream_url"]["url"] = streams[0]
                         state["stream_url"]["capture_time"] = time.time()
             except:
                 pass
@@ -204,9 +204,19 @@ def listen_loop():
             except:
                 snippet = None
             # 内存保护：只保留最近 MAX_COLLECTED 条，防止长录制把内存吃满
-            state["collected"].append({"t": round(time.time(),1), "url": url, "body": snippet})
-            if len(state["collected"]) > MAX_COLLECTED:
-                del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
+            with capture_lock:
+                state["sequence"] += 1
+                response = {"t": round(time.time(), 1), "url": url, "body": snippet,
+                            "response_sequence": state["sequence"]}
+                state["collected"].append(response)
+                if state["journal"]:
+                    try:
+                        state["journal"].write(json.dumps(response, ensure_ascii=False) + "\n")
+                        state["journal"].flush()
+                    except OSError:
+                        state["journal_error"] = True
+                if len(state["collected"]) > MAX_COLLECTED:
+                    del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
 
 def read_urls():
     """读 URL 文件，返回 [(url, lid, 已录次数, 目标次数)]"""
@@ -225,7 +235,7 @@ def read_urls():
         m2 = re.search(r"已录制(\d+)/(\d+)", raw)
         if m2:
             count = int(m2.group(1))
-            total = int(m2.group(2))
+            total = MAX_ROUND if MAX_ROUND_OVERRIDE else int(m2.group(2))
         else:
             count = 0
             total = MAX_ROUND
@@ -233,6 +243,7 @@ def read_urls():
     return out
 
 def scan_room(url, live_id):
+    state["live_id"] = str(live_id)
     state["collected"] = []
     state["stream_url"]["url"] = None
     try:
@@ -329,212 +340,15 @@ def scan_room(url, live_id):
         )
     return False
 
-def record_room(url, live_id, room_dir, surl, seg_name):
-    """录制，录完存到 seg_name（第一段/第二段...）"""
-    seg_dir = os.path.join(room_dir, seg_name)
-    # 如果这个段已存在但没有 final → 是上次失败的垃圾，清掉
-    if os.path.isdir(seg_dir):
-        has_final = any(f.endswith("_final.json") for f in os.listdir(seg_dir))
-        if not has_final:
-            for f in os.listdir(seg_dir):
-                try: os.remove(os.path.join(seg_dir, f))
-                except: pass
-    os.makedirs(seg_dir, exist_ok=True)
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # 提取首产品
-    current_pid = None
-    current_name = current_price = current_promo_price = current_category = ""
-    current_view = current_like = current_fans = ""
-    for c in state["collected"]:
-        if "live.detail.get" in (c.get("url") or ""):
-            try:
-                body = c.get("body","")
-                if isinstance(body, str) and live_id in body:
-                    m = re.search(r'"itemId"\s*:\s*"(\d+)"', body)
-                    if m:
-                        current_pid = m.group(1)
-                        mn = re.search(r'"itemName"\s*:\s*"([^"]+)"', body)
-                        current_name = mn.group(1)[:60] if mn else ""
-                        mp = re.search(r'"itemPrice"\s*:\s*"([\d.]+)"', body)
-                        current_price = mp.group(1) if mp else ""
-                        mpromo = re.search(r'"liveItemPrice"\s*:\s*\{[^}]*"promotionPrice"\s*:\s*"(\d+)"', body)
-                        current_promo_price = mpromo.group(1) if mpromo else ""
-                        mcat = re.search(r'"categoryLevelOneName"\s*:\s*"([^"]+)"', body)
-                        current_category = mcat.group(1) if mcat else ""
-                        mview = re.search(r'"viewCount"\s*:\s*"?(\d+)"?', body)
-                        current_view = mview.group(1) if mview else ""
-                        break
-            except:
-                pass
-    if not current_pid:
-        current_pid = "pending"
-        current_name = "待检测"
-    log(f"  {seg_name} 首商品: {current_name[:30]}")
-
-    rec_path = os.path.join(seg_dir, f"record_{ts}.flv")
-    record_start = time.time()
-
-    ck = get_cookie_header()
-    headers = f"Referer: {url}\r\nUser-Agent: {UA}\r\n"
-    if ck: headers += f"Cookie: {ck}\r\n"
-    cmd = [FFMPEG, "-y",
-           "-reconnect", "1", "-reconnect_streamed", "1",
-           "-reconnect_on_network_error", "1",
-           "-reconnect_delay_max", "10", "-reconnect_at_eof", "1",
-           "-rw_timeout", "10000000",
-           "-headers", headers, "-i", surl, "-c", "copy",
-           "-t", str(MAX_MIN * 60 + 60), rec_path]
-    log(f"  录制: {surl.split('/')[2]}")
-    # CDN 重试：有时连上但没数据，重试 2 次
-    ok, ffproc, ferr = False, None, None
-    for attempt in range(3):
-        ferr = open(os.path.join(seg_dir, f"ffmpeg_{ts}.log"), "w", encoding="utf-8")
-        ffproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ferr)
-        # 等 15 秒看 FLV 有没有生成
-        waited = 0
-        while waited < 30:
-            time.sleep(5)
-            waited += 5
-            if os.path.exists(rec_path) and os.path.getsize(rec_path) > 1024:
-                ok = True
-                break
-        if ok:
-            log(f"  流已接通（尝试 {attempt+1}）")
-            break
-        log(f"  尝试 {attempt+1}: FLV 未生成，重试...")
-        ffproc.kill(); ffproc.wait(timeout=5)
-        time.sleep(3)
-    if not ok:
-        log(f"  视频未生成（CDN 失败）")
-        return False
-    current_start = 0.0
-    prev_len = len(state["collected"])
-    next_reload = time.time() + 300
-    product_timeline = []
-    ok = True
-
-    try:
-        last_flv_size = 0
-        last_flv_check = time.time()
-        while True:
-            time.sleep(5)
-            solve_slider(page)
-            now = time.time()
-            elapsed = now - record_start
-            if elapsed > 30 and not (os.path.exists(rec_path) and os.path.getsize(rec_path) > 0):
-                log(f"  视频未生成"); ok = False; break
-            if elapsed >= MAX_MIN * 60:
-                log(f"  达 {MAX_MIN} 分上限"); break
-            # CDN 掉线检测：30 秒没涨就杀 ffmpeg 重连
-            if now - last_flv_check >= 30:
-                cur_size = os.path.getsize(rec_path) if os.path.exists(rec_path) else 0
-                if cur_size > 0 and cur_size == last_flv_size and elapsed > 60:
-                    log(f"  ⚠️ FLV 停止增长 at {elapsed:.0f}s，尝试重连...")
-                    ffproc.kill(); ffproc.wait(timeout=5)
-                    time.sleep(3)
-                    ferr = open(os.path.join(seg_dir, f"ffmpeg_{ts}.log"), "a", encoding="utf-8")
-                    ffproc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=ferr)
-                last_flv_size = cur_size
-                last_flv_check = now
-            if now >= next_reload:
-                try: page.get(url, timeout=30); time.sleep(4)
-                except: pass
-                next_reload = now + 300
-            # 增量存档
-            data_path = os.path.join(seg_dir, f"data_{ts}.json")
-            try:
-                json.dump({"live_url": url, "stream_url": surl,
-                    "recorded_files": [rec_path] if os.path.exists(rec_path) else [],
-                    "record_start_t": record_start, "record_end_t": now,
-                    "product_timeline": product_timeline,
-                    "captured_count": len(state["collected"]),
-                    "responses": state["collected"],
-                }, open(data_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-            except: pass
-            # 产品检测
-            new_resps = state["collected"][prev_len:]
-            prev_len = len(state["collected"])
-            for c in new_resps:
-                if "live.detail.get" in (c.get("url") or ""):
-                    try:
-                        body = c.get("body","")
-                        if isinstance(body, str) and live_id in body:
-                            m = re.search(r'"itemId"\s*:\s*"(\d+)"', body)
-                            if not m: continue
-                            pid = m.group(1)
-                            if current_pid == "pending" and pid != "pending":
-                                current_pid = pid
-                                mn = re.search(r'"itemName"\s*:\s*"([^"]+)"', body)
-                                if mn: current_name = mn.group(1)[:60]
-                                mp = re.search(r'"itemPrice"\s*:\s*"([\d.]+)"', body)
-                                if mp: current_price = mp.group(1)
-                                current_start = elapsed
-                                log(f"  检测到商品: {current_name[:30]} ¥{current_price}")
-                                continue
-                            if pid != current_pid and elapsed >= PRODUCT_MIN_SEC:
-                                product_timeline.append({
-                                    "itemId": current_pid, "name": current_name,
-                                    "price": current_price,
-                                    "start_sec": round(current_start,1), "end_sec": round(elapsed,1),
-                                })
-                                log(f"  切产品 at {elapsed:.0f}s（记录，继续录）")
-                                # 切换到新商品继续录制，不早停
-                                current_pid = pid
-                                mn = re.search(r'"itemName"\s*:\s*"([^"]+)"', body)
-                                if mn: current_name = mn.group(1)[:60]
-                                mp = re.search(r'"itemPrice"\s*:\s*"([\d.]+)"', body)
-                                if mp: current_price = mp.group(1)
-                                current_start = elapsed
-                                continue
-                    except: pass
-
-    finally:
-        try: ffproc.kill(); ffproc.wait(timeout=10)
-        except: pass
-        try: ferr.close()
-        except: pass
-
-    if ok and os.path.exists(rec_path) and os.path.getsize(rec_path) > 0:
-        # 正常完成 → 写 final
-        try:
-            json.dump({
-                "live_url": url, "stream_url": surl,
-                "recorded_files": [rec_path],
-                "record_start_t": record_start, "record_end_t": time.time(),
-                "product_timeline": product_timeline,
-                "captured_count": len(state["collected"]),
-                "responses": state["collected"],
-            }, open(os.path.join(seg_dir, f"data_{ts}_final.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-            log(f"  ✅ {seg_name} 完成: {os.path.getsize(rec_path)/1024/1024:.0f}MB")
-        except: pass
-        return True
-    else:
-        # 录制异常但超过7分钟且FLV有数据 → 保留算有效
-        elapsed = time.time() - record_start
-        if elapsed >= 420 and os.path.exists(rec_path) and os.path.getsize(rec_path) > 0:
-            log(f"  💾 {elapsed:.0f}s 中断但保留（>=7分钟）")
-            try:
-                json.dump({
-                    "live_url": url, "stream_url": surl,
-                    "recorded_files": [rec_path],
-                    "record_start_t": record_start, "record_end_t": time.time(),
-                    "product_timeline": product_timeline,
-                    "captured_count": len(state["collected"]),
-                    "responses": state["collected"],
-                }, open(os.path.join(seg_dir, f"data_{ts}_final.json"), "w", encoding="utf-8"),
-                  ensure_ascii=False, indent=2)
-                return True
-            except: pass
-        # 录制失败 → 清空这一段的所有垃圾文件
-        log(f"  🧹 清理失败段: {seg_name}")
-        for f in list(os.listdir(seg_dir)):
-            try: os.remove(os.path.join(seg_dir, f))
-            except: pass
-        try: os.rmdir(seg_dir)
-        except: pass
-        return False
+def record_room(url, live_id, room_dir, surl, seg_name, segment_index):
+    from src.crawler.recording import record_segment
+    return record_segment(
+        url=url, live_id=live_id, room_dir=room_dir, stream_url=surl,
+        segment_index=segment_index, seg_name=seg_name, ffmpeg=FFMPEG,
+        ffprobe=FFPROBE, max_minutes=MAX_MIN, user_agent=UA,
+        cookie_header=get_cookie_header(), state=state, lock=capture_lock,
+        page=page, log=log, publish_status=publish_status,
+    )
 
 def mark_recorded(lid, count, total):
     """更新 urls 计数：先每日备份一次，再原子写入（临时文件+os.replace），防崩溃损坏"""
@@ -542,11 +356,14 @@ def mark_recorded(lid, count, total):
     lines = open(path, encoding="utf-8").readlines()
     tag = f"已录制{count}/{total}"
     for i, line in enumerate(lines):
-        if f"liveId={lid}" in line:
+        match = re.search(r"liveId=(\d+)\b", line)
+        if match and match.group(1) == str(lid):
             if "待录制" in line:
                 lines[i] = line.replace("待录制", tag)
             elif "已录制" in line:
                 lines[i] = line.rsplit(",", 1)[0] + f",{tag}\n"
+            else:
+                lines[i] = line.rstrip("\r\n") + f",{tag}\n"
             break
     bak = path + ".bak_" + time.strftime("%Y%m%d")
     if not os.path.exists(bak):
@@ -559,47 +376,44 @@ def mark_recorded(lid, count, total):
     with open(tmp, "w", encoding="utf-8") as f:
         f.writelines(lines)
     os.replace(tmp, path)
+    progress_path = os.environ.get("LIVE_PROGRESS_FILE")
+    if progress_path:
+        progress = {}
+        if os.path.isfile(progress_path):
+            with open(progress_path, encoding="utf-8") as progress_file:
+                progress = json.load(progress_file)
+        progress[str(lid)] = {"count": count, "target": total, "updated_t": time.time()}
+        atomic_json(progress_path, progress, backup=True)
 
 def finalize_room(lid):
-    """房间录满 → 调 parse(复制JSON+FLV到sessions, 生成CSV) → 删staging FLV"""
+    """Copy and verify a full room as part of a batch. Keep all staging sources."""
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
-
-    # v2.0 路径：scripts/parse_data.py（兼容 v1.0 的 parse_taobao_data.py）
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidates = [
-        os.path.join(project_root, "scripts", "parse_data.py"),
-        os.path.join(os.path.dirname(STUDY_ROOT), "parse_taobao_data.py"),
-    ]
-    parse_script = next((p for p in candidates if os.path.exists(p)), candidates[0])
-    parse_ok = False
-    if os.path.exists(parse_script):
-        try:
-            result = subprocess.run(
-                [sys.executable, parse_script, room_dir],
-                capture_output=True, timeout=600, cwd=STUDY_ROOT
-            )
-            out = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
-            log(f"  📊 parse: {out[-150:] if out else 'OK'}")
-            if "VIDEO_COPY_OK" in out:  # 全部FLV复制成功才删staging
-                parse_ok = True
-        except Exception as e:
-            log(f"  ⚠️ parse 失败: {e}")
-
-    # 确认FLV复制成功后才删staging中的FLV（保留JSON）
-    if parse_ok:
-        deleted = 0
-        for root, dirs, files in os.walk(room_dir):
-            for f in files:
-                if f.endswith(".flv"):
-                    try:
-                        os.remove(os.path.join(root, f))
-                        deleted += 1
-                    except: pass
-        log(f"  🧹 清理staging FLV: {deleted}个 (JSON保留)")
-    log(f"  🏁 room_{lid} 完成")
+    script = os.path.join(project_root, "scripts", "parse_data.py")
+    publish_status("archiving", live_id=lid)
+    try:
+        result = subprocess.run([sys.executable, script, room_dir], capture_output=True,
+                                timeout=600, cwd=project_root,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        output = result.stdout.decode("utf-8", errors="replace")
+        if result.returncode != 0 or "ARCHIVE_COPY_OK" not in output:
+            log(f"  归档未通过校验，留在队列: {output[-300:]}")
+            return False
+        log(f"  room_{lid} 归档校验完成；staging 原视频与 JSON 保留")
+        return True
+    except Exception as error:
+        log(f"  归档失败，全部源文件保留: {error}")
+        return False
 
 # ========== 主流程 ==========
 log(f"ffmpeg={os.path.exists(FFMPEG)}")
+publish_status("starting")
+if DELAY:
+    log(f"延迟 {DELAY} 秒启动浏览器")
+    interruptible_wait(DELAY)
+if stop_requested():
+    publish_status("stopped")
+    sys.exit(0)
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -622,8 +436,9 @@ try:
     pref_dir = os.path.join(user_data, "Default")
     os.makedirs(pref_dir, exist_ok=True)
     import json as _j
-    _j.dump({"browser":{"has_seen_welcome_page":True,"suppress_first_run_default_browser_prompt":True}},
-            open(os.path.join(pref_dir, "Preferences"), "w"))
+    pref_path = os.path.join(pref_dir, "Preferences")
+    if not os.path.exists(pref_path):
+        atomic_json(pref_path, {"browser": {"has_seen_welcome_page": True}})
 except: pass
 
 co = ChromiumOptions()
@@ -632,7 +447,7 @@ co.set_argument("--no-sandbox")
 co.set_argument("--disable-gpu")
 co.set_argument("--disable-blink-features=AutomationControlled")
 co.set_argument("--window-size=1440,900")
-co.set_argument("--window-position=-32000,-32000")
+co.set_argument("--window-position=50,50")
 co.set_argument("--lang=zh-CN")
 co.set_argument("--disable-extensions")
 co.set_argument("--disable-background-mode")
@@ -659,11 +474,29 @@ page.get("https://www.taobao.com", timeout=20); time.sleep(2)
 if logged_in():
     log("已有登录态")
 else:
-    saved = json.load(open(COOKIE_JSON, encoding="utf-8"))
-    page.set.cookies(saved); page.refresh(); time.sleep(3)
-    if logged_in(): log("Cookie 注入成功")
-    else:
-        log("请手动登录后按回车..."); input()
+    if os.path.isfile(COOKIE_JSON):
+        try:
+            with open(COOKIE_JSON, encoding="utf-8") as saved_file:
+                page.set.cookies(json.load(saved_file))
+            page.refresh()
+            time.sleep(3)
+        except Exception as error:
+            log(f"Cookie 读取失败: {type(error).__name__}")
+    if not logged_in():
+        log("请在新开的 Edge 窗口登录，程序最多等候 5 分钟")
+        publish_status("login_required")
+        deadline = time.monotonic() + 300
+        while not logged_in() and not stop_requested() and time.monotonic() < deadline:
+            time.sleep(2)
+        if not logged_in():
+            publish_status("stopped" if stop_requested() else "login_timeout")
+            sys.exit(3)
+if logged_in():
+    try:
+        atomic_json(COOKIE_JSON, list(page.cookies()), backup=True)
+    except Exception as error:
+        log(f"登录态保存失败: {type(error).__name__}")
+publish_status("ready")
 
 page.listen.start("")
 threading.Thread(target=listen_loop, daemon=True).start()
@@ -711,20 +544,27 @@ for url, lid, count, total in url_pool:
     except Exception:
         pass
     if not found_sess:
-        pending_finalize.append(lid)   # 全新满段 → 正常批量归档
+        room_path = os.path.join(OUTDIR, f"room_{lid}")
+        finals = sum(f.endswith("_final.json") for _, _, fs in os.walk(room_path) for f in fs)
+        if finals >= total:
+            pending_finalize.append(lid)
+        else:
+            log(f"room_{lid} 清单已满段，但 staging 仅 {finals}/{total} 个 final；不自动解析")
     elif n_sess < count:
         suspect_finalize.append(lid)   # 有额外未归档段 → 人工确认
 if pending_finalize:
     log(f"📋 启动发现 {len(pending_finalize)} 间已满段，待归档（已跳过 session 已归档房间）")
-    if len(pending_finalize) >= 6:
+    if len(pending_finalize) >= BATCH_ROOMS:
         log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
-        for flid in pending_finalize:
-            finalize_room(flid)
-        pending_finalize.clear()
+        pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
 if suspect_finalize:
     log(f"⚠️ {len(suspect_finalize)} 间 staging 有未归档段且 session 已存在（不自动 parse，需人工确认）: {suspect_finalize}")
 
 while True:
+    publish_status("waiting", pending_rooms=len(pending_finalize))
+    if stop_requested():
+        log("收到停止请求，当前段已完成，原数据保留")
+        break
     now = time.time()
     # 优先挑已录过+冷却完的，其次新房
     hot = []   # 已录过且冷却完了（需要第2/3段）
@@ -758,7 +598,7 @@ while True:
             if remaining == 0:
                 log("🎉 本实例所有房间已录满")
                 break
-        time.sleep(wait)
+        interruptible_wait(wait)
         continue
 
     url, lid, count, total = random.choice(candidates)
@@ -777,13 +617,16 @@ while True:
         time.sleep(5); continue
 
     # 录制
+    if stop_requested():
+        break
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
     surl = state["stream_url"].get("url", "")
     rec_start_t = time.time()
     try:
-        ok = record_room(url, lid, room_dir, surl, seg_name)
+        ok = record_room(url, lid, room_dir, surl, seg_name, count + 1)
     except Exception as e:
         log(f"  录制异常: {e}")
+        last_record[lid] = time.time()
         continue
 
     if ok:
@@ -793,17 +636,15 @@ while True:
         if elapsed < MAX_MIN * 60:
             pad = MAX_MIN * 60 - elapsed
             log(f"  ⏳ 填满 {MAX_MIN}分槽位，等 {pad:.0f}s")
-            time.sleep(pad)
+            interruptible_wait(pad)
         log(f"📀 room_{lid} {new_count}/{total} 轮")
         if new_count >= total:
             pending_finalize.append(lid)
-            log(f"  📋 加入归档队列 ({len(pending_finalize)}/6)")
-            if len(pending_finalize) >= 6:
+            log(f"  📋 加入归档队列 ({len(pending_finalize)}/{BATCH_ROOMS})")
+            if len(pending_finalize) >= BATCH_ROOMS:
                 log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
-                for flid in pending_finalize:
-                    finalize_room(flid)
-                pending_finalize.clear()
-                log(f"   ✅ 批量归档完成\n")
+                pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
+                log(f"   批量归档结束，{len(pending_finalize)} 间未通过校验留在队列\n")
         last_record[lid] = rec_start_t
         url_pool = read_urls()  # 重载
     else:
@@ -811,9 +652,6 @@ while True:
         if login_expired():
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
-        # 清理空房间目录
-        try:
-            if os.path.isdir(room_dir) and not os.listdir(room_dir):
-                os.rmdir(room_dir)
-        except: pass
         last_record[lid] = now
+
+publish_status("stopped" if stop_requested() else "finished", pending_rooms=len(pending_finalize))

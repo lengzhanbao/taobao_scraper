@@ -35,16 +35,7 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-# ---- 清理上次异常退出遗留的浏览器/ffmpeg 进程 ----
-import subprocess as _sp
-try:
-    _sp.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True, timeout=5)
-except Exception: pass
-try:
-    _sp.run(["taskkill", "/F", "/IM", "msedge.exe"], capture_output=True, timeout=5)
-    log("已清理遗留浏览器进程，5秒后启动...")
-    time.sleep(5)
-except Exception: pass
+# Preserve browsers and recorders owned by other tasks. Never kill by image name.
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 

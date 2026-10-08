@@ -76,3 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 数字人检测
 - 数据解析和归档
 
+# 2.1 local control panel (2026-10-08)
+
+- Added a loopback-only browser dashboard with editable recording settings, per-instance segment counts, dependency checks, run snapshots, progress and logs.
+- Added graceful stop requests, hidden child processes, persistent PID creation-time tracking and per-port locks.
+- Removed automatic source deletion and global Edge/FFmpeg termination from the updated crawler/collector.
+- Added atomic final metadata, separate retry attempts, complete response journals, FFprobe checks and per-file archive SHA256 manifests.
+- Retained synthetic self-checks under `_control/selfchecks`; no production recordings run during validation.
+

@@ -16,6 +16,8 @@
 
 ### 核心功能
 
+新增 **2.1 本地采集控制台**：双击 `scripts/open_control_panel.vbs`，在网页中设置段数、每段时长上限、冷却、批量归档，查看环境、进度和日志。详见 [控制台使用说明](docs/control-panel.md)。
+
 ✅ **多实例并行录制** - 5个独立浏览器实例，同时监控不同直播间  
 ✅ **智能数字人检测** - 自动识别数字人主播直播间  
 ✅ **完整数据采集** - 视频录制 + 弹幕抓取 + 商品信息 + 直播数据  
@@ -612,7 +614,9 @@ This tool is for educational and research purposes only. Users must comply with 
 - Windows 默认编码运行 `python verify_structure.py` 会因 GBK 无法输出 `✓` 而报 `UnicodeEncodeError`；`python -X utf8 verify_structure.py` 通过。
 - 本次审查环境为 Python 3.11.7，未安装 `DrissionPage`。系统 PATH 能找到 FFmpeg，但全新副本缺少默认配置路径 `DouyinLiveRecorder_v4.0.7/ffmpeg/ffmpeg.exe`。部署时需安装 `requirements.txt` 依赖，并将 `LIVE_FFMPEG` 配为实际可执行文件路径。
 
-### 尚未修复风险（运行前请先处理）
+### 当时发现的风险（已在 2.1 控制台版本修复）
+
+以下记录针对上述历史提交。2.1 已移除自动删除和全局进程清理，补充缺 Cookie 的登录等待；细节见 [控制台说明](docs/control-panel.md)。
 
 1. `scripts/collect_digital.py` 启动时强制结束系统中全部 `ffmpeg.exe` 和 `msedge.exe`，可能中断其他录制并关闭其他 Edge。不要在修复前运行该入口。[代码位置](https://github.com/lengzhanbao/taobao_scraper/blob/6182db314417293b3eec5f1af6f8b8c1a4bdc2cb/src/detector/collect_digital.py#L30-L42)
 2. 主爬虫启动清理会递归删除部分没有 `_final.json` 的暂存段；录制时还会清理已有但未完成的段目录，可能造成数据丢失。修复清理逻辑并确认备份后，再对已有数据目录运行。[代码位置](https://github.com/lengzhanbao/taobao_scraper/blob/6182db314417293b3eec5f1af6f8b8c1a4bdc2cb/src/crawler/taobao_crawler.py#L42-L77)

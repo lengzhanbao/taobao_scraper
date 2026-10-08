@@ -11,6 +11,7 @@ import runpy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Run crawler with instance 4 config
+os.environ.setdefault("LIVE_MAX_ROUND", "4")
 sys.argv = [sys.argv[0], "urls_4.txt", "9226", "135"]
 crawler = os.path.join(os.path.dirname(__file__), "..", "src", "crawler", "taobao_crawler.py")
 runpy.run_path(os.path.abspath(crawler), run_name="__main__")
