@@ -21,37 +21,47 @@ import webbrowser
 from src.control.settings import ROOT, defaults, validate, migrate_settings, read_url_list, build_environment
 from src.utils.safe_io import atomic_json
 from src.crawler.runtime_control import pause_requested
-from src.control.url_lists import inspect as inspect_urls, save_list
+from src.control.url_lists import inspect as inspect_urls, save_list, correct_count
 
 CONTROL = ROOT / "_control"
-VERSION = "2.4-local-panel"
+VERSION = "2.5-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 
 
 def summarize_rows(rows):
     target = sum(row["target"] for row in rows)
     completed = sum(min(row["count"], row["target"]) for row in rows)
-    verified = sum(row.get("valid_count", 0) for row in rows)
+    known = [row["valid_count"] for row in rows if row.get("valid_count") is not None]
+    unknown = sum(row.get("valid_count") is None for row in rows)
+    verified = sum(known)
     archived = sum(row.get("archived_count", 0) for row in rows)
-    verified_completed = sum(min(row.get("valid_count", 0), row["target"]) for row in rows)
+    verified_completed = sum(min(row["valid_count"], row["target"])
+                             for row in rows if row.get("valid_count") is not None)
+    progress_percent = (round(verified_completed * 100 / target, 1) if target else 0)
+    if not known and unknown:
+        verified = verified_completed = progress_percent = None
     return {"rooms": len(rows), "complete": sum(r["count"] >= r["target"] for r in rows),
-            "verified_complete": sum(r.get("valid_count", 0) >= r["target"] for r in rows),
+            "verified_complete": sum(r.get("valid_count") is not None and
+                                     r["valid_count"] >= r["target"] for r in rows),
             "recorded": sum(r["count"] for r in rows), "remaining": target - completed,
             "valid_segments": verified, "archived_segments": archived,
-            "target_segments": target, "completed_segments": verified_completed,
-            "progress_percent": round(verified_completed * 100 / target, 1) if target else 0}
+            "unverified_rooms": unknown, "target_segments": target,
+            "completed_segments": verified_completed, "progress_percent": progress_percent,
+            "progress_state": "unverified" if not known and unknown else
+                              "partial" if unknown else "verified"}
 
 
-def verified_progress_counts(progress, study_root):
-    """Count only schema-v2 receipts whose final JSON and video still match saved identity."""
+def verified_progress_records(progress, study_root):
+    """Return receipt identities, historical counts and per-room receipt state."""
     if not isinstance(progress, dict):
-        return {}, {}
+        return {}, {}, {}
     if progress.get("schema_version") != 2 or not isinstance(progress.get("rooms"), dict):
         legacy = {key: value.get("count", 0) for key, value in progress.items()
                   if isinstance(value, dict) and type(value.get("count")) is int}
-        return {}, legacy
+        return {}, legacy, {}
     staging = (Path(study_root) / "_staging").resolve()
     verified = {}
+    receipt_states = {}
     raw_legacy = progress.get("legacy_counts", {})
     legacy = ({str(key): value for key, value in raw_legacy.items()
                if type(value) is int and value >= 0} if isinstance(raw_legacy, dict) else {})
@@ -60,8 +70,13 @@ def verified_progress_counts(progress, study_root):
             continue
         if type(room.get("count")) is int and room["count"] >= 0:
             legacy[live_id] = max(legacy.get(live_id, 0), room["count"])
+        receipts = room.get("segments", [])
+        if not isinstance(receipts, list):
+            receipts = []
+        if receipts:
+            receipt_states[live_id] = "invalid"
         identities = set()
-        for receipt in room.get("segments", []):
+        for receipt in receipts:
             try:
                 final_path = Path(receipt["final_json"]).resolve()
                 video_path = Path(receipt["video_path"]).resolve()
@@ -75,6 +90,9 @@ def verified_progress_counts(progress, study_root):
                     continue
                 with final_path.open(encoding="utf-8") as stream:
                     final = json.load(stream)
+                if (not isinstance(final, dict)
+                        or not isinstance(final.get("recorded_files"), list)):
+                    continue
                 if (str(final.get("recording_id")) != str(receipt["recording_id"])
                         or int(final.get("segment_index", -1)) != int(receipt["segment_index"])
                         or video_path not in [Path(item).resolve() for item in final.get("recorded_files", [])]
@@ -83,25 +101,38 @@ def verified_progress_counts(progress, study_root):
                 identities.add(str(receipt["recording_id"]))
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
-        verified[live_id] = len(identities)
-    return verified, legacy if isinstance(legacy, dict) else {}
+        if receipts:
+            verified[live_id] = identities
+            if identities:
+                receipt_states[live_id] = "verified"
+    return verified, legacy if isinstance(legacy, dict) else {}, receipt_states
 
 
-def archived_segment_counts(study_root):
-    """Count unique segments present in preserved, generated archive manifests."""
+def verified_progress_counts(progress, study_root):
+    records, legacy, _ = verified_progress_records(progress, study_root)
+    return {live_id: len(items) for live_id, items in records.items()}, legacy
+
+
+def archived_segment_records(study_root):
+    """Return unique verified recording IDs copied into preserved archive sessions."""
     sessions = (Path(study_root) / "sessions").resolve()
-    counts = {}
+    recordings_by_room = {}
     if not sessions.is_dir():
-        return counts
+        return recordings_by_room
     for manifest_path in sessions.glob("*/archive_manifest.json"):
         try:
             with manifest_path.open(encoding="utf-8") as stream:
                 manifest = json.load(stream)
+            if not isinstance(manifest, dict):
+                continue
             if manifest.get("source_preserved") is not True:
                 continue
             live_id = str(manifest["room_id"])
-            recordings = counts.setdefault(live_id, set())
-            for item in manifest.get("entries", []):
+            recordings = recordings_by_room.setdefault(live_id, set())
+            entries = manifest.get("entries", [])
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
                 if not isinstance(item, dict):
                     continue
                 recording_id = str(item.get("recording_id", ""))
@@ -112,7 +143,57 @@ def archived_segment_counts(study_root):
                 recordings.add(recording_id)
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             continue
-    return {live_id: len(recordings) for live_id, recordings in counts.items()}
+    return recordings_by_room
+
+
+def archived_segment_counts(study_root):
+    return {live_id: len(records) for live_id, records in archived_segment_records(study_root).items()}
+
+
+def read_count_corrections(study_root):
+    """Read retained correction requests; malformed lines do not hide earlier entries."""
+    path = Path(study_root) / "_control" / "url_count_corrections.jsonl"
+    events = {}
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        continue
+                    correction_id = event.get("correction_id")
+                    if isinstance(correction_id, str) and correction_id:
+                        events.setdefault(correction_id, {}).update(event)
+                except (ValueError, TypeError):
+                    continue
+    except OSError:
+        pass
+    latest = {}
+    for event in events.values():
+        if event.get("event") not in ("requested", "completed"):
+            continue
+        instance_id = event.get("instance_id")
+        live_id = event.get("live_id")
+        if (type(instance_id) is not int or not 1 <= instance_id <= 5
+                or not isinstance(live_id, str) or not live_id.isdigit()
+                or type(event.get("after_count")) is not int):
+            continue
+        timestamp = event.get("corrected_t", event.get("requested_t", 0))
+        if type(timestamp) not in (int, float):
+            continue
+        key = (instance_id, live_id)
+        if key not in latest or timestamp >= latest[key].get("corrected_t", 0):
+            latest[key] = {**event, "corrected_t": timestamp}
+    return latest
+
+
+def append_count_correction(study_root, event):
+    path = Path(study_root) / "_control" / "url_count_corrections.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def load_json(path, fallback):
@@ -240,31 +321,120 @@ class Manager:
             result['message'] = '网址清单已保存；正在运行的任务使用启动时的清单，新清单下次启动生效。'
             return result
 
+    def correct_url_count(self, body):
+        with self.lock:
+            instance_id = body.get('instance_id')
+            live_id = str(body.get('live_id', '')).strip()
+            count = body.get('count')
+            reason = body.get('reason', '').strip() if isinstance(body.get('reason'), str) else ''
+            if type(instance_id) is not int or not 1 <= instance_id <= 5:
+                raise ValueError('实例编号必须是 1—5 的整数')
+            if type(count) is not int or not 0 <= count <= 10000:
+                raise ValueError('更正段数必须是 0—10000 的整数')
+            if not reason or len(reason) > 200:
+                raise ValueError('请填写 1—200 字的更正原因')
+            if body.get('confirmed') is not True:
+                raise ValueError('请先确认已对照有效视频和 final JSON 核对段数')
+            document = self.url_document(instance_id)
+            if body.get('revision') != document['revision']:
+                raise ValueError('网址文件已被其他操作修改。请重新加载后再更正。')
+            row = next((item for item in document['rows'] if item['live_id'] == live_id), None)
+            if row is None:
+                raise ValueError('当前实例清单中找不到这个直播 ID')
+            progress = load_json(Path(self.settings['study_root']) / '_control' /
+                                 f"progress_{self.settings['instances'][instance_id - 1]['port']}.json", {})
+            receipt_records, _, _ = verified_progress_records(progress, self.settings['study_root'])
+            archive_ids = archived_segment_records(self.settings['study_root']).get(live_id, set())
+            evidence_floor = len(receipt_records.get(live_id, set()) | archive_ids)
+            if count < evidence_floor:
+                raise ValueError(f'更正值不能低于已核验的 {evidence_floor} 段')
+
+            correction_id = uuid.uuid4().hex
+            requested_t = time.time()
+            source_row = next((item for item in read_url_list(document['path'], document['target'])
+                               if item['live_id'] == live_id), row)
+            event = {"correction_id": correction_id, "instance_id": instance_id,
+                     "live_id": live_id, "before_count": row['count'],
+                     "source_count": source_row['count'], "after_count": count,
+                     "valid_count": row['valid_count'], "archived_count": row['archived_count'],
+                     "reason": reason, "confirmed": True, "requested_t": requested_t,
+                     "expected_revision": document['revision'],
+                     "event": "requested"}
+            append_count_correction(self.settings['study_root'], event)
+            try:
+                saved = correct_count(document['path'], document['target'], live_id, count,
+                                      body.get('revision'))
+            except Exception as error:
+                try:
+                    append_count_correction(self.settings['study_root'], {
+                        **event, "event": "failed", "failure_type": type(error).__name__,
+                        "failed_t": time.time()})
+                except OSError:
+                    pass
+                raise
+            append_count_correction(self.settings['study_root'], {
+                **event, "event": "completed", "corrected_t": requested_t,
+                "revision": saved['revision']})
+            self._archive_cache = ("", 0, {})
+            self.check_cache = None
+            result = self.url_document(instance_id)
+            result['backup'] = saved['backup']
+            result['correction_id'] = correction_id
+            result['corrected_t'] = requested_t
+            result['message'] = ('历史计数已更正并写入审计日志。运行中的任务仍使用启动时的网址快照；'
+                                 '更正值从下一次启动生效。')
+            return result
+
     def url_rows(self, instance, config=None, snapshot=None):
         config = config or self.settings
         source = snapshot or Path(config["study_root"]) / "_config" / instance["urls_file"]
         rows = read_url_list(source, instance["segments"])
         progress = load_json(Path(config["study_root"]) / "_control" /
                              f"progress_{instance['port']}.json", {})
-        valid_counts, legacy_counts = verified_progress_counts(progress, config["study_root"])
-        archive_counts = self.archive_counts(config["study_root"])
+        valid_records, legacy_counts, receipt_states = verified_progress_records(progress, config["study_root"])
+        archive_records = self.archive_records(config["study_root"])
+        corrections = read_count_corrections(config["study_root"]) if snapshot is None else {}
         for row in rows:
             live_id = row["live_id"]
             progress_entry = progress.get("rooms", {}).get(live_id, {}) if isinstance(progress, dict) else {}
             saved_count = progress_entry.get("count", 0) if isinstance(progress_entry, dict) else 0
-            row["count"] = max(row["count"], legacy_counts.get(live_id, 0), saved_count)
-            row["valid_count"] = valid_counts.get(live_id, 0)
-            row["archived_count"] = archive_counts.get(live_id, 0)
+            archive_ids = archive_records.get(live_id, set())
+            receipt_ids = valid_records.get(live_id, set())
+            all_valid_ids = receipt_ids | archive_ids
+            correction = corrections.get((instance["id"], live_id))
+            if correction and correction['event'] == 'requested':
+                correction = correction if row['count'] == correction.get('after_count') else None
+            if correction:
+                updated_t = progress_entry.get('updated_t', 0) if isinstance(progress_entry, dict) else 0
+                post_correction_count = (saved_count if isinstance(updated_t, (int, float))
+                                         and updated_t > correction['corrected_t'] else 0)
+                row["count"] = max(row["count"], correction['after_count'], post_correction_count,
+                                   len(archive_ids))
+            else:
+                row["count"] = max(row["count"], legacy_counts.get(live_id, 0), saved_count)
+            row["valid_count"] = len(all_valid_ids) if all_valid_ids or live_id in receipt_states else None
+            row["archived_count"] = len(archive_ids)
+            if row["valid_count"] is None:
+                row['validation_state'] = '未核验'
+            elif row["valid_count"] == 0 and receipt_states.get(live_id) == 'invalid':
+                row['validation_state'] = '凭据失效'
+            elif row['valid_count'] < row['count']:
+                row['validation_state'] = '部分核验'
+            else:
+                row['validation_state'] = '已核验'
         return rows
 
-    def archive_counts(self, study_root):
+    def archive_records(self, study_root):
         now = time.monotonic()
         root = str(Path(study_root).resolve())
         if self._archive_cache[0] == root and now - self._archive_cache[1] < 30:
             return self._archive_cache[2]
-        result = archived_segment_counts(study_root)
-        self._archive_cache = (root, now, result)
-        return result
+        records = archived_segment_records(study_root)
+        self._archive_cache = (root, now, records)
+        return records
+
+    def archive_counts(self, study_root):
+        return {live_id: len(records) for live_id, records in self.archive_records(study_root).items()}
 
     def jobs(self):
         jobs = []
@@ -433,24 +603,35 @@ class Manager:
                 if instance["enabled"] or job:
                     for row in rows:
                         previous = distinct.get(row["live_id"], {"count": 0, "target": 0,
-                                                                   "valid_count": 0, "archived_count": 0})
+                                                                   "valid_count": None, "archived_count": 0})
+                        previous_valid = previous["valid_count"]
+                        row_valid = row["valid_count"]
                         distinct[row["live_id"]] = {
                             "count": max(previous["count"], row["count"]),
                             "target": max(previous["target"], row["target"]),
-                            "valid_count": max(previous["valid_count"], row["valid_count"]),
+                            "valid_count": (max(previous_valid, row_valid)
+                                            if previous_valid is not None and row_valid is not None
+                                            else previous_valid if row_valid is None else row_valid),
                             "archived_count": max(previous["archived_count"], row["archived_count"]),
                         }
             totals["rooms"] = len(distinct)
             totals["completed_rooms"] = sum(r["count"] >= r["target"] for r in distinct.values())
-            totals["verified_rooms"] = sum(r["valid_count"] >= r["target"] for r in distinct.values())
+            known_counts = [r["valid_count"] for r in distinct.values() if r["valid_count"] is not None]
+            unverified_rooms = sum(r["valid_count"] is None for r in distinct.values())
+            totals["verified_rooms"] = sum(r["valid_count"] is not None and
+                                            r["valid_count"] >= r["target"] for r in distinct.values())
             totals["recorded_segments"] = sum(r["count"] for r in distinct.values())
-            totals["valid_segments"] = sum(r["valid_count"] for r in distinct.values())
+            totals["valid_segments"] = sum(known_counts) if known_counts or not unverified_rooms else None
             totals["archived_segments"] = sum(r["archived_count"] for r in distinct.values())
             totals["remaining_segments"] = sum(max(0, r["target"] - r["count"]) for r in distinct.values())
             totals["target_segments"] = sum(r["target"] for r in distinct.values())
-            totals["completed_segments"] = sum(min(r["valid_count"], r["target"]) for r in distinct.values())
-            totals["progress_percent"] = (round(totals["completed_segments"] * 100 / totals["target_segments"], 1)
-                                          if totals["target_segments"] else 0)
+            completed_valid = sum(min(r["valid_count"], r["target"]) for r in distinct.values()
+                                  if r["valid_count"] is not None)
+            totals["completed_segments"] = (completed_valid if known_counts or not unverified_rooms else None)
+            totals["unverified_rooms"] = unverified_rooms
+            totals["progress_percent"] = (round(completed_valid * 100 / totals["target_segments"], 1)
+                                          if totals["target_segments"] and
+                                          (known_counts or not unverified_rooms) else None)
             return {"settings": self.settings, "instances": instances, "totals": totals,
                     "jobs": jobs, "preflight": self.check_cache,
                     "version": VERSION, "code_root": str(ROOT),
@@ -522,6 +703,7 @@ def handler_for(manager, token, expected_origin):
                 actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True)
                 actions["/api/resume"] = lambda: manager.set_paused(body.get("instance_id"), False)
                 actions['/api/urls'] = lambda: manager.save_urls(body)
+                actions['/api/urls/correct-count'] = lambda: manager.correct_url_count(body)
                 if self.path not in actions:
                     return self.reply(404, {"error": "操作不存在"})
                 return self.reply(200, actions[self.path]())

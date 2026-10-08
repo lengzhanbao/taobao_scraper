@@ -23,7 +23,9 @@ ARTIFACTS.mkdir(parents=True, exist_ok=False)
 os.environ["LIVE_STUDY_ROOT"] = str(ARTIFACTS / "study")
 
 from src.control.settings import defaults, validate, build_environment, read_url_list
-from src.control.server import Manager, handler_for, process_birth, verified_progress_counts, archived_segment_counts, compatible_existing_service
+from src.control.server import (Manager, handler_for, process_birth, verified_progress_counts,
+                                verified_progress_records, archived_segment_counts,
+                                compatible_existing_service)
 from src.utils.safe_io import atomic_json, verified_copy, PortLock
 from src.crawler.recording import record_segment
 from src.crawler.runtime_control import pause_requested, wait_while_paused
@@ -156,6 +158,12 @@ class Checks(unittest.TestCase):
             with urlopen(request, timeout=5) as response:
                 saved = json.load(response)
                 self.assertIn('987654321', [row['live_id'] for row in saved['rows']])
+            correction = Request(origin + '/api/urls/correct-count', json.dumps({
+                'instance_id': 1, 'live_id': '987654321', 'count': 0,
+                'reason': '合成路由测试', 'confirmed': True, 'revision': saved['revision']}).encode(),
+                headers={'Origin': origin, 'X-Control-Token': 'synthetic-token'})
+            with urlopen(correction, timeout=5) as response:
+                self.assertTrue(json.load(response)['correction_id'])
             malicious_urls = Request(origin + '/api/urls', b'{}', headers={'Origin': 'http://external.test',
                                      'X-Control-Token': 'synthetic-token'})
             with self.assertRaises(HTTPError) as error:
@@ -295,9 +303,10 @@ class Checks(unittest.TestCase):
             state = manager.state()
             self.assertEqual(state["totals"]["target_segments"], 6)
             self.assertEqual(state["totals"]["recorded_segments"], 2)
-            self.assertEqual(state["totals"]["completed_segments"], 0)
-            self.assertEqual(state["totals"]["valid_segments"], 0)
-            self.assertEqual(state["totals"]["progress_percent"], 0)
+            self.assertIsNone(state["totals"]["completed_segments"])
+            self.assertIsNone(state["totals"]["valid_segments"])
+            self.assertIsNone(state["totals"]["progress_percent"])
+            self.assertEqual(state["totals"]["unverified_rooms"], 2)
             manager.set_paused(1, False)
             self.assertFalse(pause_requested(run["jobs"][0]["pause_file"]))
             self.assertTrue(Path(run["jobs"][0]["pause_file"]).exists())
@@ -311,6 +320,62 @@ class Checks(unittest.TestCase):
             self.assertEqual(manager.stop()["requested"], 2)
             with self.assertRaises(ValueError):
                 manager.set_paused(1, False)
+
+    def test_17_count_correction_audit_ignores_stale_progress_and_keeps_run_snapshot(self):
+        folder = self.folder("count_correction")
+        config = self.config(folder)
+        source = Path(config["study_root"]) / "_config" / "urls_1.txt"
+        source.write_text("https://tbzb.taobao.com/live?liveId=123,已录制1/3\n", encoding="utf-8")
+        archive_video = Path(config["study_root"]) / "sessions" / "synthetic" / "video.flv"
+        archive_video.parent.mkdir(parents=True)
+        archive_video.write_bytes(b"synthetic archived evidence")
+        atomic_json(archive_video.parent / "archive_manifest.json", {"room_id": "123",
+            "source_preserved": True, "entries": [{"recording_id": "rec-archive",
+                "destination": str(archive_video.resolve()), "bytes": archive_video.stat().st_size}]})
+        manager = Manager(config, control=folder / "control")
+        snapshot = None
+
+        class Child:
+            pid = 12345
+
+        with patch.object(manager, "preflight", return_value={"ok": True}), \
+                patch("src.control.server.subprocess.Popen", return_value=Child()), \
+                patch("src.control.server.process_birth", return_value="fake-birth"):
+            run = manager.start()
+            snapshot = Path(run["jobs"][0]["urls_file"])
+            original_snapshot = snapshot.read_bytes()
+            document = manager.url_document(1)
+            progress_path = Path(config["study_root"]) / "_control" / f"progress_{config['instances'][0]['port']}.json"
+            atomic_json(progress_path, {"schema_version": 2, "legacy_counts": {"123": 3},
+                                        "rooms": {"123": {"count": 3, "updated_t": 100,
+                                                            "segments": []}}})
+            self.assertEqual(manager.url_document(1)["rows"][0]["count"], 3)
+            result = manager.correct_url_count({"instance_id": 1, "live_id": "123", "count": 1,
+                "reason": "合成测试：逐段核对后修正", "confirmed": True, "revision": document["revision"]})
+            self.assertTrue(result["correction_id"])
+            self.assertIn("已录制1/3", source.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot.read_bytes(), original_snapshot)
+            # Old schema-v2 room count and legacy_counts cannot restore the prior 3.
+            self.assertEqual(manager.url_rows(config["instances"][0])[0]["count"], 1)
+            after_correction = manager.url_document(1)
+            with self.assertRaisesRegex(ValueError, "不能低于已核验的 1 段"):
+                manager.correct_url_count({"instance_id": 1, "live_id": "123", "count": 0,
+                    "reason": "不应低于证据", "confirmed": True, "revision": after_correction["revision"]})
+            audit = Path(config["study_root"]) / "_control" / "url_count_corrections.jsonl"
+            events = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["requested", "completed"])
+            self.assertEqual(events[0]["before_count"], 3)
+            self.assertEqual(events[1]["after_count"], 1)
+            # A progress update after correction is accepted as a later recording.
+            atomic_json(progress_path, {"schema_version": 2, "legacy_counts": {"123": 3},
+                                        "rooms": {"123": {"count": 2,
+                                                           "updated_t": result["corrected_t"] + 1,
+                                                           "segments": []}}})
+            self.assertEqual(manager.url_rows(config["instances"][0])[0]["count"], 2)
+            after_progress = manager.url_document(1)
+            manager.save_urls({"instance_id": 1, "text": "123\n456",
+                               "revision": after_progress["revision"], "mode": "replace"})
+            self.assertEqual(snapshot.read_bytes(), original_snapshot)
 
     def test_11_pause_wait_resume_and_stop(self):
         folder = self.folder("pause_wait")
@@ -382,6 +447,18 @@ class Checks(unittest.TestCase):
         self.assertEqual(summary["valid_segments"], 1)
         self.assertEqual(summary["archived_segments"], 1)
         self.assertEqual(summary["progress_percent"], 100)
+        unknown = summarize_rows([{"count": 3, "target": 3, "valid_count": None,
+                                   "archived_count": 0}])
+        self.assertIsNone(unknown["completed_segments"])
+        self.assertIsNone(unknown["valid_segments"])
+        self.assertEqual(unknown["unverified_rooms"], 1)
+        mixed = summarize_rows([{"count": 3, "target": 3, "valid_count": 1,
+                                 "archived_count": 0},
+                                {"count": 3, "target": 3, "valid_count": None,
+                                 "archived_count": 0}])
+        self.assertEqual(mixed["completed_segments"], 1)
+        self.assertEqual(mixed["progress_percent"], 16.7)
+        self.assertEqual(mixed["unverified_rooms"], 1)
         import importlib
         from src.utils import config as runtime_config
         try:
@@ -415,15 +492,20 @@ class Checks(unittest.TestCase):
         valid, legacy = verified_progress_counts(progress, study)
         self.assertEqual(valid, {'123': 1})
         self.assertEqual(legacy, {'123': 3})
+        records, _, states = verified_progress_records(progress, study)
+        self.assertEqual(records, {'123': {'rec-1'}})
+        self.assertEqual(states, {'123': 'verified'})
         video.write_bytes(b'changed synthetic video')
         valid, _ = verified_progress_counts(progress, study)
         self.assertEqual(valid, {'123': 0})
+        _, _, states = verified_progress_records(progress, study)
+        self.assertEqual(states, {'123': 'invalid'})
         valid, legacy = verified_progress_counts({'123': {'count': 4}}, study)
         self.assertEqual(valid, {})
         self.assertEqual(legacy, {'123': 4})
         valid, legacy = verified_progress_counts({'schema_version': 2, 'legacy_counts': ['bad'],
                          'rooms': {'123': {'count': 3, 'segments': []}}}, study)
-        self.assertEqual(valid, {'123': 0})
+        self.assertEqual(valid, {})
         self.assertEqual(legacy, {'123': 3})
 
         sessions = study / 'sessions'

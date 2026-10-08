@@ -113,3 +113,60 @@ def save_list(path, target, text, expected_revision, mode='replace'):
     result = inspect(path, target)
     result.update({'backup': str(backup) if backup else None, 'rooms': len(incoming)})
     return result
+
+
+def correct_count(path, target, live_id, count, expected_revision):
+    """Set one room's counter exactly, including retained history, with a full backup."""
+    path = Path(path)
+    if not isinstance(live_id, str) or not live_id.isdigit() or len(live_id) > 30:
+        raise ValueError('直播 ID 无效')
+    if type(count) is not int or not 0 <= count <= 10000:
+        raise ValueError('更正段数必须是 0—10000 的整数')
+    current = inspect(path, target)
+    if current['revision'] != expected_revision:
+        raise ValueError('网址文件已被其他操作修改。请重新加载后再更正。')
+    original = path.read_bytes() if path.exists() else b''
+    newline = '\r\n' if b'\r\n' in original else '\n'
+    bom = b'\xef\xbb\xbf' if original.startswith(b'\xef\xbb\xbf') else b''
+    lines = current['text'].splitlines()
+    active_matches = 0
+    output_lines = []
+    for line in lines:
+        match = re.search(r'liveId=(\d+)\b', line)
+        if not match or match.group(1) != live_id:
+            output_lines.append(line)
+            continue
+        if not line.lstrip().startswith('#'):
+            active_matches += 1
+        marker = f'已录制{count}/{target}'
+        if re.search(r'已录制\d+/\d+', line):
+            line = re.sub(r'已录制\d+/\d+', marker, line)
+        else:
+            line = line.rstrip() + ',' + marker
+        output_lines.append(line)
+    if active_matches == 0:
+        raise ValueError('当前清单中找不到这个直播 ID 的启用行')
+    output = newline.join(output_lines) + (newline if current['text'].endswith(('\n', '\r')) else '')
+    data = bom + output.encode('utf-8')
+    if data == original:
+        return {**current, 'backup': None, 'rooms': active_matches}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content_hash = revision(original)
+    backup = path.with_name(path.name + '.bak_' + content_hash)
+    if backup.exists():
+        if revision(backup.read_bytes()) != content_hash:
+            raise ValueError('同名备份已存在但内容校验不一致，原清单未修改')
+    else:
+        shutil.copy2(path, backup)
+    temp = path.with_name(path.name + '.tmp_' + uuid.uuid4().hex)
+    with temp.open('xb') as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    if inspect(path, target)['revision'] != expected_revision:
+        raise ValueError('更正过程中原文件发生变化，备份与临时文件均保留。请重新加载。')
+    os.replace(temp, path)
+    result = inspect(path, target)
+    result.update({'backup': str(backup), 'rooms': active_matches})
+    return result

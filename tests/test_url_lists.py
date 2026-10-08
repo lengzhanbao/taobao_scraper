@@ -5,7 +5,7 @@ from pathlib import Path
 import unittest
 import uuid
 
-from src.control.url_lists import inspect, parse_input, save_list
+from src.control.url_lists import inspect, parse_input, save_list, correct_count
 from src.control.settings import read_url_list, defaults
 from src.control.server import Manager
 
@@ -68,6 +68,32 @@ class UrlListsTests(unittest.TestCase):
         self.assertEqual(saved['text'].count('liveId=123'), 1)
         self.assertTrue(Path(first_backup).is_file())
 
+    def test_exact_count_correction_updates_active_and_history_with_backup(self):
+        original = ('\ufeff# 历史保留 https://tbzb.taobao.com/live?liveId=123,已录制5/3\r\n'
+                    'https://tbzb.taobao.com/live?liveId=123,已录制3/3\r\n').encode('utf-8')
+        self.path.write_bytes(original)
+        document = inspect(self.path, 3)
+        corrected = correct_count(self.path, 3, '123', 1, document['revision'])
+        self.assertEqual(Path(corrected['backup']).read_bytes(), original)
+        self.assertEqual(corrected['text'].count('已录制1/3'), 2)
+        self.assertTrue(self.path.read_bytes().startswith(b'\xef\xbb\xbf'))
+        self.assertIn(b'\r\n', self.path.read_bytes())
+        self.assertEqual(read_url_list(self.path, 3)[0]['count'], 1)
+        # Normal URL saves retain their safety guard, now based on corrected evidence.
+        save_list(self.path, 3, '123', corrected['revision'])
+        self.assertEqual(read_url_list(self.path, 3)[0]['count'], 1)
+        self.assertTrue(Path(corrected['backup']).is_file())
+        with self.assertRaises(ValueError):
+            correct_count(self.path, 3, '123', 0, document['revision'])
+
+    def test_correction_requires_active_room_and_integer(self):
+        self.path.write_text('# https://tbzb.taobao.com/live?liveId=123,已录制2/3\n', encoding='utf-8')
+        document = inspect(self.path, 3)
+        with self.assertRaisesRegex(ValueError, '启用行'):
+            correct_count(self.path, 3, '123', 1, document['revision'])
+        with self.assertRaises(ValueError):
+            correct_count(self.path, 3, '123', True, document['revision'])
+
     def test_manager_uses_configured_file_only(self):
         manager = Manager(defaults(self.root / 'study'), control=self.root / 'control')
         document = manager.url_document(1)
@@ -114,8 +140,8 @@ class UrlListsTests(unittest.TestCase):
 
     def test_strict_version_gate(self):
         from src.control.server import compatible_existing_service
-        state = {'code_root': 'E:/app', 'version': '2.1-local-panel'}
-        self.assertFalse(compatible_existing_service(state, 'E:/app', '2.4-local-panel'))
-        state['version'] = '2.4-local-panel'
-        self.assertTrue(compatible_existing_service(state, 'E:/app', '2.4-local-panel'))
-        self.assertFalse(compatible_existing_service(state, 'E:/other', '2.4-local-panel'))
+        state = {'code_root': 'E:/app', 'version': '2.4-local-panel'}
+        self.assertFalse(compatible_existing_service(state, 'E:/app', '2.5-local-panel'))
+        state['version'] = '2.5-local-panel'
+        self.assertTrue(compatible_existing_service(state, 'E:/app', '2.5-local-panel'))
+        self.assertFalse(compatible_existing_service(state, 'E:/other', '2.5-local-panel'))

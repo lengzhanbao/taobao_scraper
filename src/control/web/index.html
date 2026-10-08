@@ -17,17 +17,17 @@
     <div class="side-bottom"><span class="dot green"></span> 本机运行 <p>数字人直播研究</p><small>原始视频和 JSON 持续保留</small></div>
   </aside>
   <main id="overview">
-    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">v2.4</span></div></header>
+    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">正在连接</span></div></header>
     <section class="heading"><div><div class="eyebrow">COLLECTION WORKSPACE</div><h1>淘宝直播采集控制台</h1><p>设置录制节奏，查看进度，集中管理采集任务。</p></div><div class="actions"><button id="check">检查环境</button><button id="start" class="primary">▶ 启动采集</button></div></section>
     <div id="message" role="status" aria-live="polite" class="message" hidden></div>
-    <div class="status-strip"><span class="dot" id="run-dot"></span><strong id="run-status">读取状态中</strong><span id="run-detail">参数只在下一次启动时生效</span><button id="stop" class="text-button" disabled>录完当前段后停止</button></div>
+    <div class="status-strip"><span class="dot" id="run-dot"></span><strong id="run-status">读取状态中</strong><span id="run-detail">参数只在下一次启动时生效</span><span class="sync-status"><strong id="connection-state">正在连接</strong><small id="last-sync">尚无成功同步</small></span><button id="stop" class="text-button" disabled>录完当前段后停止</button></div>
     <section class="metrics">
       <article><span>直播间 · 启用实例</span><strong id="rooms">—</strong><small>按链接清单去重统计</small></article>
       <article><span>历史计数达到目标房间</span><strong id="completed">—</strong><small>来自网址清单或历史进度文件</small></article>
       <article><span>清单历史计数段数</span><strong id="recorded">—</strong><small>旧计数保留，未自动当作有效验证</small></article>
       <article><span>历史计数剩余目标段</span><strong id="remaining">—</strong><small>按历史计数作为续录位置计算</small></article>
     </section>
-    <div class="verification-strip"><article><span>有效段数</span><strong id="verified">—</strong><small>新版本保留校验文件凭据；旧计数不计入</small></article><article><span>已归档段数</span><strong id="archived">—</strong><small>基于归档清单中的校验文件</small></article></div>
+    <div class="verification-strip"><article><span>有效段数</span><strong id="verified">—</strong><small id="verified-note">新版本保留校验文件凭据；旧计数不计入</small></article><article><span>已归档段数</span><strong id="archived">—</strong><small>基于归档清单中的校验文件</small></article></div>
     <section class="collection-progress" aria-label="整体录制进度"><div><strong>有效录制进度</strong><span id="total-progress-text">读取中</span></div><progress id="total-progress" max="100" value="0" aria-label="已验证有效段数百分比"></progress><small>新版录制须通过视频与最终 JSON 文件校验才计入；旧版历史计数单独显示，不参与此进度。</small></section>
     <section class="workflow" aria-label="操作步骤"><a href="#urls"><b>1</b> 添加直播网址</a><a href="#settings"><b>2</b> 设置录制节奏</a><a href="#environment"><b>3</b> 检查并启动</a><a href="#instances"><b>4</b> 查看进度 / 暂停</a></section>
     <section class="card" id="urls">
@@ -38,6 +38,10 @@
         <div class="url-editor-grid"><div><label for="url-text">采集清单 · 每行一个淘宝直播链接或直播 ID</label><textarea id="url-text" rows="10" spellcheck="false" placeholder="https://tbzb.taobao.com/live?liveId=123456789&#10;也可以粘贴旧清单，已录制计数会保留。"></textarea><div class="editor-footer"><span id="url-note" role="status">先加载对应实例的清单</span><button id="url-save" class="primary" disabled>保存清单</button></div></div>
           <div class="url-add"><h3>批量追加网址</h3><p>追加到已保存清单；同一直播 ID 自动合并，不重置已录制段数。</p><textarea id="url-add-text" rows="5" spellcheck="false" aria-label="追加网址" placeholder="把新网址粘贴到这里，每行一个"></textarea><button id="url-append" disabled>添加到这个实例</button><p class="hint">编辑清单时移出的行会保留为停用历史；原文件另有完整备份。运行期间保存，下一次启动生效。</p></div></div>
         <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>历史计数 / 目标</th><th>有效段</th><th>已归档段</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
+        <details class="count-correction"><summary>核对后更正错误历史计数</summary><p class="hint">仅修正所选实例的源网址清单；原文件会备份并记录到审计日志。运行中的任务继续使用启动时的清单。更正值不能低于已核验或已归档段数。</p>
+          <div class="correction-grid"><label>直播 ID<input id="correct-live-id" inputmode="numeric" maxlength="30" placeholder="从上方表格复制"></label><label>实际有效段数<input id="correct-count" type="number" min="0" max="10000" step="1" placeholder="0"></label><label class="correction-reason">更正原因<input id="correct-reason" maxlength="200" placeholder="例如：逐段核对视频和 final JSON 后发现旧计数偏高"></label></div>
+          <label class="confirm-label"><input id="correct-confirmed" type="checkbox">我已对照实际有效视频与 final JSON 核对段数</label><button id="correct-submit" disabled>备份并更正历史计数</button>
+        </details>
       </div>
     </section>
     <div class="workspace-grid">
