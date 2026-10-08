@@ -35,8 +35,11 @@ from src.utils.digital_flags import (
 )
 URLS_FILE = os.environ.get("LIVE_URLS_FILE", os.path.join(STUDY_ROOT, "_config", sys.argv[1]))
 PORT = int(sys.argv[2])
-COOKIE_JSON = os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
+COOKIE_JSON = os.environ.get(
+    "LIVE_COOKIE_JSON", os.path.join(STUDY_ROOT, "_config", "taobao_cookies.json")
+)
 OUTDIR = os.path.join(STUDY_ROOT, "_staging", f"browser_{PORT}")
+OUTDIR = os.environ.get("LIVE_STAGING_ROOT", OUTDIR)
 COOKIE_TXT = os.path.join(STUDY_ROOT, "_config", f"taobao_cookies_{PORT}.txt")
 UA = USER_AGENT
 
@@ -471,7 +474,7 @@ try: page = ChromiumPage(co)
 except Exception as e: log(f"启动失败: {e}"); sys.exit(2)
 
 page.get("https://www.taobao.com", timeout=20); time.sleep(2)
-if logged_in():
+if logged_in() and os.environ.get("LIVE_SAVE_COOKIES", "1") != "0":
     log("已有登录态")
 else:
     if os.path.isfile(COOKIE_JSON):
