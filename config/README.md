@@ -30,6 +30,8 @@ export LIVE_PYTHON="python3"
 | `LIVE_MAX_MIN` | `20` | Minutes recorded per segment |
 | `LIVE_MAX_ROUND` | `3` | Default segments per room (urls file can override) |
 | `LIVE_COOLDOWN_SEC` | `7200` | Cooldown between two recordings of the same room |
+| `LIVE_BATCH_ROOMS` | `6` | Positive integer; 1 archives each completed room |
+| `LIVE_PAUSE_FILE` | unset | Per-instance JSON control file with paused=true/false; pause after the current segment |
 | `LIVE_PRODUCT_MIN_SEC` | `0` | Product switch handling (0 = record only) |
 | `LIVE_MAX_COLLECTED` | `800` | Max intercepted responses kept in memory |
 | `LIVE_USER_AGENT` | Chrome 126 UA | Browser user agent |

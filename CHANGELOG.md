@@ -84,3 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added atomic final metadata, separate retry attempts, complete response journals, FFprobe checks and per-file archive SHA256 manifests.
 - Retained synthetic self-checks under `_control/selfchecks`; no production recordings run during validation.
 
+# Local control panel 2.2
+
+- Accept any positive integer archive threshold, including one completed room; reject zero and negative values.
+- Show total and per-instance segment progress and current segment elapsed time with progress bars.
+- Add independent pause/resume controls that take effect after the current segment and retain cooldown and source files.
+- Compute active progress from the run snapshot and show scanning, validation, pause and recording failure states explicitly.
+- Respect LIVE_SAVE_COOKIES=0 when saving the cookie JSON after login.
+- Existing tasks keep their loaded version; the updated panel and crawler take effect after a restart.
+

@@ -26,6 +26,7 @@ from src.control.settings import defaults, validate, build_environment, read_url
 from src.control.server import Manager, handler_for, process_birth
 from src.utils.safe_io import atomic_json, verified_copy, PortLock
 from src.crawler.recording import record_segment
+from src.crawler.runtime_control import pause_requested, wait_while_paused
 from src.parser import parse_data
 
 
@@ -45,7 +46,8 @@ class Checks(unittest.TestCase):
     def test_01_validation_and_environment(self):
         config = defaults(ARTIFACTS / "validation")
         self.assertEqual(validate(config)["instances"][3]["segments"], 4)
-        for field, value in (("max_minutes", 0), ("max_minutes", True), ("batch_rooms", 5),
+        for field, value in (("max_minutes", 0), ("max_minutes", True), ("batch_rooms", 0),
+                             ("batch_rooms", -1), ("batch_rooms", True), ("batch_rooms", 1.5),
                              ("python", "relative.exe"), ("cooldown_minutes", -1)):
             bad = copy.deepcopy(config)
             bad[field] = value
@@ -56,6 +58,11 @@ class Checks(unittest.TestCase):
         self.assertEqual(env["LIVE_MAX_MIN"], "20")
         self.assertEqual(env["LIVE_COOLDOWN_SEC"], "7200")
         self.assertEqual(env["LIVE_BATCH_ROOMS"], "6")
+        for threshold in (1, 5, 101, 1000000):
+            config["batch_rooms"] = threshold
+            self.assertEqual(validate(config)["batch_rooms"], threshold)
+        env = build_environment(config, config["instances"][0], "snapshot", "status", "stop", "run", "pause.json")
+        self.assertEqual(env["LIVE_PAUSE_FILE"], "pause.json")
 
     def test_02_url_deduplication(self):
         folder = self.folder("urls")
@@ -141,6 +148,13 @@ class Checks(unittest.TestCase):
                                  headers={"Origin": origin, "X-Control-Token": "synthetic-token"})
             with urlopen(legitimate, timeout=5) as response:
                 self.assertEqual(response.status, 200)
+            with patch.object(manager, "set_paused", return_value={"paused": True}) as pause:
+                for route, expected in (("pause", True), ("resume", False)):
+                    request = Request(origin + "/api/" + route, b'{"instance_id":2}',
+                                      headers={"Origin": origin, "X-Control-Token": "synthetic-token"})
+                    with urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                    pause.assert_called_with(2, expected)
         finally:
             server.shutdown()
             server.server_close()
@@ -192,6 +206,7 @@ class Checks(unittest.TestCase):
         folder = self.folder("recording")
         def attempt(fail_final):
             state = {"collected": [{"t": 1, "url": "test", "body": "{}", "response_sequence": 1}], "journal": None}
+            phases = []
             class Child:
                 pid = 12345
                 calls = 0
@@ -210,11 +225,14 @@ class Checks(unittest.TestCase):
                     patch("src.crawler.recording.stop_recorder"), \
                     patch("src.crawler.recording.time.sleep"), \
                     patch("src.crawler.recording.atomic_json", side_effect=write):
-                return record_segment(url="https://test", live_id="123", room_dir=folder / str(fail_final),
+                result = record_segment(url="https://test", live_id="123", room_dir=folder / str(fail_final),
                                       stream_url="synthetic://stream", segment_index=2, seg_name="第二段",
                                       ffmpeg="synthetic", ffprobe="synthetic", max_minutes=20, user_agent="test",
                                       cookie_header="", state=state, lock=threading.Lock(), page=None,
-                                      log=lambda message: None, publish_status=lambda phase, **kwargs: None)
+                                      log=lambda message: None, publish_status=lambda phase, **kwargs: phases.append(phase))
+                self.assertIn("validating", phases)
+                self.assertEqual(phases[-1], "segment_failed" if fail_final else "segment_completed")
+                return result
         self.assertTrue(attempt(False))
         self.assertFalse(attempt(True))
         self.assertEqual(len(list(folder.rglob("*.flv"))), 2)
@@ -234,6 +252,146 @@ class Checks(unittest.TestCase):
         rows = namespace["read_urls"]()
         self.assertEqual(rows[0][2], 0)
         self.assertEqual(rows[1][2:], (2, 7))
+
+    def test_10_independent_pause_resume_and_snapshot_progress(self):
+        folder = self.folder("pause_manager")
+        config = self.config(folder)
+        config["instances"][1]["enabled"] = True
+        for index in (1, 2):
+            (Path(config["study_root"]) / "_config" / f"urls_{index}.txt").write_text(
+                f"https://tbzb.taobao.com/live?liveId={index},已录制1/3\n", encoding="utf-8")
+        manager = Manager(config, control=folder / "control")
+        class Child:
+            pid = 12345
+        with patch.object(manager, "preflight", return_value={"ok": True}), \
+                patch("src.control.server.subprocess.Popen", return_value=Child()), \
+                patch("src.control.server.process_birth", return_value="fake-birth"):
+            run = manager.start()
+            self.assertEqual(len(run["jobs"]), 2)
+            manager.set_paused(1, True)
+            self.assertTrue(pause_requested(run["jobs"][0]["pause_file"]))
+            self.assertFalse(pause_requested(run["jobs"][1]["pause_file"]))
+            restored = Manager(config, control=folder / "control")
+            self.assertTrue(restored.jobs()[0]["pause_requested"])
+            # Edit the next run's directory and targets; active progress must stay on its snapshot.
+            next_config = copy.deepcopy(config)
+            next_config["study_root"] = str(folder / "next_study")
+            next_config["instances"][0]["segments"] = 1
+            next_config["instances"][1]["enabled"] = False
+            manager.save(next_config)
+            state = manager.state()
+            self.assertEqual(state["totals"]["target_segments"], 6)
+            self.assertEqual(state["totals"]["completed_segments"], 2)
+            self.assertAlmostEqual(state["totals"]["progress_percent"], 33.3)
+            manager.set_paused(1, False)
+            self.assertFalse(pause_requested(run["jobs"][0]["pause_file"]))
+            self.assertTrue(Path(run["jobs"][0]["pause_file"]).exists())
+            legacy_path = run["jobs"][0].pop("pause_file")
+            with self.assertRaisesRegex(ValueError, "旧版本"):
+                manager.set_paused(1, True)
+            run["jobs"][0]["pause_file"] = legacy_path
+            for invalid_id in (0, 6, True, "1"):
+                with self.assertRaises(ValueError):
+                    manager.set_paused(invalid_id, True)
+            self.assertEqual(manager.stop()["requested"], 2)
+            with self.assertRaises(ValueError):
+                manager.set_paused(1, False)
+
+    def test_11_pause_wait_resume_and_stop(self):
+        folder = self.folder("pause_wait")
+        path = folder / "pause.json"
+        phases = []
+        atomic_json(path, {"paused": True})
+        def resume(_seconds):
+            atomic_json(path, {"paused": False}, backup=True)
+        self.assertTrue(wait_while_paused(path, stop_requested=lambda: False,
+                                         publish_status=lambda phase, **fields: phases.append(phase),
+                                         log=lambda text: None, sleep=resume))
+        self.assertEqual(phases, ["paused"])
+        atomic_json(path, {"paused": True})
+        self.assertFalse(wait_while_paused(path, stop_requested=lambda: True,
+                                          publish_status=lambda *args, **fields: None, log=lambda text: None))
+        path.write_text("invalid control", encoding="utf-8")
+        self.assertTrue(pause_requested(path))
+
+    def test_12_real_crawler_loop_pause_and_one_room_archive(self):
+        folder = self.folder("loop")
+        tree = ast.parse((ROOT / "src" / "crawler" / "taobao_crawler.py").read_text(encoding="utf-8"))
+        main_loop = next(node for node in tree.body if isinstance(node, ast.While))
+        for pause_during_record, threshold in ((True, 1), (False, 1), (False, 2)):
+            with self.subTest(pause=pause_during_record, threshold=threshold):
+                path = folder / f"pause_{pause_during_record}_{threshold}.json"
+                atomic_json(path, {"paused": False})
+                events = []
+                stopped = [False]
+                rows = [("https://test", "123", 0, 1)]
+                def record(*args):
+                    events.append("record_finished")
+                    if pause_during_record:
+                        atomic_json(path, {"paused": True})
+                    return True
+                def mark(*args):
+                    events.append("marked")
+                    rows[0] = ("https://test", "123", 1, 1)
+                def archive(*args):
+                    events.append("archived")
+                    return True
+                def pause_sleep(_seconds):
+                    events.append("paused")
+                    self.assertIn("marked", events)
+                    stopped[0] = True
+                def wait(path, **kwargs):
+                    return wait_while_paused(path, sleep=pause_sleep, **kwargs)
+                import random
+                namespace = {"wait_while_paused": wait, "pause_requested": pause_requested, "PAUSE_FILE": str(path),
+                             "stop_requested": lambda: stopped[0], "publish_status": lambda *args, **fields: None,
+                             "log": lambda text: None, "pending_finalize": [], "batch_ready": False,
+                             "time": time, "url_pool": rows,
+                             "last_record": {}, "COOLDOWN_SEC": 0, "random": random, "SEG_NAMES": ["第一段"],
+                             "scan_room": lambda *args: True, "record_room": record, "mark_recorded": mark,
+                             "MAX_MIN": 0, "BATCH_ROOMS": threshold, "OUTDIR": str(folder), "os": os,
+                             "state": {"stream_url": {"url": "synthetic://stream"}}, "read_urls": lambda: rows,
+                             "finalize_room": archive}
+                exec(compile(ast.Module(body=[main_loop], type_ignores=[]), "synthetic_main_loop", "exec"), namespace)
+                self.assertEqual(events.count("record_finished"), 1)
+                self.assertIn("marked", events)
+                self.assertEqual("archived" in events, threshold == 1 and not pause_during_record)
+                self.assertEqual("paused" in events, pause_during_record)
+
+    def test_13_progress_caps_and_runtime_threshold(self):
+        from src.control.server import summarize_rows
+        self.assertEqual(summarize_rows([])["progress_percent"], 0)
+        summary = summarize_rows([{"count": 4, "target": 1}])
+        self.assertEqual(summary["recorded"], 4)
+        self.assertEqual(summary["completed_segments"], 1)
+        self.assertEqual(summary["progress_percent"], 100)
+        import importlib
+        from src.utils import config as runtime_config
+        try:
+            with patch.dict(os.environ, {"LIVE_BATCH_ROOMS": "1"}):
+                self.assertEqual(importlib.reload(runtime_config).BATCH_ROOMS, 1)
+            for value in ("0", "-1"):
+                with patch.dict(os.environ, {"LIVE_BATCH_ROOMS": value}):
+                    with self.assertRaises(ValueError):
+                        importlib.reload(runtime_config)
+        finally:
+            importlib.reload(runtime_config)
+
+    def test_14_readonly_cookie_flag(self):
+        folder = self.folder("cookie_guard")
+        path = folder / "cookies.json"
+        path.write_text("original synthetic cookie", encoding="utf-8")
+        tree = ast.parse((ROOT / "src" / "crawler" / "taobao_crawler.py").read_text(encoding="utf-8"))
+        save_block = next(node for node in tree.body if isinstance(node, ast.If)
+                          and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                                  and child.func.id == "atomic_json" for child in ast.walk(node)))
+        namespace = {"os": os, "logged_in": lambda: True, "COOKIE_JSON": str(path)}
+        with patch.dict(os.environ, {"LIVE_SAVE_COOKIES": "0"}), \
+                patch("src.utils.safe_io.atomic_json") as write:
+            namespace["atomic_json"] = write
+            exec(compile(ast.Module(body=[save_block], type_ignores=[]), "cookie_guard", "exec"), namespace)
+            write.assert_not_called()
+        self.assertEqual(path.read_text(encoding="utf-8"), "original synthetic cookie")
 
 
 if __name__ == "__main__":

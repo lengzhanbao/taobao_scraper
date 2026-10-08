@@ -52,3 +52,8 @@ jobs:
     - name: Verify structure
       run: |
         python verify_structure.py
+
+    - name: Check control panel UI
+      run: |
+        node --check src/control/web/app.js
+        node tests/test_control_ui.js

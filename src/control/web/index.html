@@ -16,7 +16,7 @@
     <div class="side-bottom"><span class="dot green"></span> 本机运行 <p>数字人直播研究</p><small>原始视频和 JSON 持续保留</small></div>
   </aside>
   <main id="overview">
-    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">v2.1</span></div></header>
+    <header><div class="crumb">工作空间 / 采集</div><div class="pill"><span class="dot green"></span> 本地控制台 <span id="version">v2.2</span></div></header>
     <section class="heading"><div><div class="eyebrow">COLLECTION WORKSPACE</div><h1>淘宝直播采集控制台</h1><p>设置录制节奏，查看进度，集中管理采集任务。</p></div><div class="actions"><button id="check">检查环境</button><button id="start" class="primary">▶ 启动采集</button></div></section>
     <div id="message" role="status" aria-live="polite" class="message" hidden></div>
     <div class="status-strip"><span class="dot" id="run-dot"></span><strong id="run-status">读取状态中</strong><span id="run-detail">参数只在下一次启动时生效</span><button id="stop" class="text-button" disabled>录完当前段后停止</button></div>
@@ -26,13 +26,14 @@
       <article><span>已录制段数</span><strong id="recorded">—</strong><small>旧清单计数尚未重新验证</small></article>
       <article><span>待录制段数</span><strong id="remaining">—</strong><small>按当前设置计算</small></article>
     </section>
+    <section class="collection-progress" aria-label="整体录制进度"><div><strong>整体录制进度</strong><span id="total-progress-text">读取中</span></div><progress id="total-progress" max="100" value="0" aria-label="已完成目标段数百分比"></progress><small>成功录制并通过视频校验的段落才增加进度；旧清单计数沿用原记录。</small></section>
     <div class="workspace-grid">
       <section class="card" id="settings"><div class="card-header"><div><h2>录制设置</h2><p>每次启动保存一份参数快照</p></div><span class="tag">数字人采集</span></div>
         <form id="settings-form">
           <div class="form-grid">
             <label>每段时长上限<div class="input-unit"><input id="max-minutes" type="number" min="1" max="120" required><span>分钟</span></div></label>
             <label>同一直播间冷却<div class="input-unit"><input id="cooldown" type="number" min="1" max="1440" required><span>分钟</span></div></label>
-            <label>满段房间批量归档<div class="input-unit"><input id="batch-rooms" type="number" min="6" max="100" required><span>间 / 实例</span></div></label>
+            <label>满段房间批量归档<div class="input-unit"><input id="batch-rooms" type="number" min="1" step="1" required><span>间 / 实例</span></div></label>
             <label>实例启动间隔<div class="input-unit"><input id="launch-gap" type="number" min="0" max="300" required><span>秒</span></div></label>
           </div>
           <label class="path-label">数据保存位置<input id="study-root" required></label>
@@ -50,8 +51,8 @@
         <div class="rule-foot">平台标记用于筛选；录制后仍可复核整段响应和视频。</div>
       </section>
     </div>
-    <section class="card" id="instances"><div class="card-header"><div><h2>实例与采集进度</h2><p>每个实例可独立开关、设置目标段数。修改后点击“保存设置”。</p></div><span class="tag muted" id="enabled-count">5 个实例</span></div>
-      <div class="table-scroll"><table><thead><tr><th>启用</th><th>浏览器实例</th><th>每房间段数</th><th>直播间</th><th>完成 / 总数</th><th>运行状态</th><th>当前录制</th></tr></thead><tbody id="instance-rows"></tbody></table></div>
+    <section class="card" id="instances"><div class="card-header"><div><h2>实例与采集进度</h2><p>启用开关和目标段数在下次启动生效；暂停 / 继续独立控制当前实例，暂停等当前段录完后生效。</p></div><span class="tag muted" id="enabled-count">5 个实例</span></div>
+      <div class="table-scroll"><table><thead><tr><th>下次启用</th><th>浏览器实例</th><th>每房间段数</th><th>房间完成 / 总数</th><th>段落录制进度</th><th>运行状态</th><th>当前录制</th><th>实例控制</th></tr></thead><tbody id="instance-rows"></tbody></table></div>
     </section>
     <section class="card" id="environment"><div class="card-header"><div><h2>环境检查</h2><p>启动前自动检查依赖、磁盘空间、链接和端口。</p></div><span id="check-time" class="small muted-text">尚未检查</span></div><div id="checks" class="checks-empty">点击上方“检查环境”查看结果。</div></section>
     <section class="card" id="logs"><div class="card-header"><div><h2>运行日志</h2><p>仅显示由这个控制台启动的任务</p></div><div class="log-actions"><label for="log-instance">实例</label><select id="log-instance"><option value="1">Edge 1</option><option value="2">Edge 2</option><option value="3">Edge 3</option><option value="4">Edge 4</option><option value="5">Edge 5</option></select><button id="refresh-log">刷新</button></div></div><pre id="log-content">暂无本次运行日志。</pre></section>

@@ -53,10 +53,12 @@ def validate(config):
             raise ValueError(key + " 请填写完整路径")
         out[key] = str(Path(value).resolve())
     for key, low, high in (("max_minutes", 1, 120), ("cooldown_minutes", 1, 1440),
-                           ("batch_rooms", 6, 100), ("launch_gap_seconds", 0, 300)):
+                           ("launch_gap_seconds", 0, 300)):
         value = config[key]
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"{key} 必须是 {low}—{high} 的整数")
+    if type(config["batch_rooms"]) is not int or config["batch_rooms"] <= 0:
+        raise ValueError("batch_rooms 必须是正整数（至少 1 间）")
     if not isinstance(config["instances"], list) or len(config["instances"]) != 5:
         raise ValueError("需要 5 个实例设置")
     rows = []
@@ -96,7 +98,7 @@ def read_url_list(path, target):
     return list(found.values())
 
 
-def build_environment(config, instance, url_snapshot, status_path, stop_path, run_id):
+def build_environment(config, instance, url_snapshot, status_path, stop_path, run_id, pause_path=None):
     return {
         "LIVE_STUDY_ROOT": config["study_root"], "LIVE_FFMPEG": config["ffmpeg"],
         "LIVE_FFPROBE": config["ffprobe"], "LIVE_EDGE_PATH": config["edge"],
@@ -104,6 +106,7 @@ def build_environment(config, instance, url_snapshot, status_path, stop_path, ru
         "LIVE_MAX_ROUND_OVERRIDE": "1", "LIVE_COOLDOWN_SEC": str(config["cooldown_minutes"] * 60),
         "LIVE_BATCH_ROOMS": str(config["batch_rooms"]), "LIVE_URLS_FILE": str(url_snapshot),
         "LIVE_STATUS_FILE": str(status_path), "LIVE_STOP_FILE": str(stop_path),
+        "LIVE_PAUSE_FILE": str(pause_path) if pause_path else "",
         "LIVE_PROGRESS_FILE": str(Path(config["study_root"]) / "_control" / f"progress_{instance['port']}.json"),
         "LIVE_RUN_ID": run_id, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(ROOT / "_control" / "pycache"),

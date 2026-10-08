@@ -33,6 +33,7 @@ from src.utils.digital_flags import (
     find_values_by_key, parse_json_body,
     summarize_digital_flags, title_keywords_in_values,
 )
+from src.crawler.runtime_control import pause_requested, wait_while_paused
 URLS_FILE = os.environ.get("LIVE_URLS_FILE", os.path.join(STUDY_ROOT, "_config", sys.argv[1]))
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.environ.get(
@@ -47,6 +48,7 @@ os.makedirs(OUTDIR, exist_ok=True)
 port_lock = PortLock(os.path.join(STUDY_ROOT, "_control", f"port_{PORT}.lock"))
 STATUS_FILE = os.environ.get("LIVE_STATUS_FILE")
 STOP_FILE = os.environ.get("LIVE_STOP_FILE")
+PAUSE_FILE = os.environ.get("LIVE_PAUSE_FILE")
 RUN_ID = os.environ.get("LIVE_RUN_ID", "manual")
 status_data = {"pid": os.getpid(), "port": PORT, "run_id": RUN_ID}
 
@@ -67,7 +69,7 @@ def stop_requested():
 
 def interruptible_wait(seconds):
     deadline = time.monotonic() + max(0, seconds)
-    while time.monotonic() < deadline and not stop_requested():
+    while time.monotonic() < deadline and not stop_requested() and not pause_requested(PAUSE_FILE):
         time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 # 启动时只报告未完成目录，保留所有原文件。
@@ -417,6 +419,10 @@ if DELAY:
 if stop_requested():
     publish_status("stopped")
     sys.exit(0)
+if not wait_while_paused(PAUSE_FILE, stop_requested=stop_requested,
+                         publish_status=publish_status, log=log):
+    publish_status("stopped")
+    sys.exit(0)
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -474,7 +480,7 @@ try: page = ChromiumPage(co)
 except Exception as e: log(f"启动失败: {e}"); sys.exit(2)
 
 page.get("https://www.taobao.com", timeout=20); time.sleep(2)
-if logged_in() and os.environ.get("LIVE_SAVE_COOKIES", "1") != "0":
+if logged_in():
     log("已有登录态")
 else:
     if os.path.isfile(COOKIE_JSON):
@@ -494,7 +500,7 @@ else:
         if not logged_in():
             publish_status("stopped" if stop_requested() else "login_timeout")
             sys.exit(3)
-if logged_in():
+if logged_in() and os.environ.get("LIVE_SAVE_COOKIES", "1") != "0":
     try:
         atomic_json(COOKIE_JSON, list(page.cookies()), backup=True)
     except Exception as error:
@@ -563,11 +569,21 @@ if pending_finalize:
 if suspect_finalize:
     log(f"⚠️ {len(suspect_finalize)} 间 staging 有未归档段且 session 已存在（不自动 parse，需人工确认）: {suspect_finalize}")
 
+batch_ready = False
 while True:
+    if not wait_while_paused(PAUSE_FILE, stop_requested=stop_requested,
+                             publish_status=publish_status, log=log):
+        break
     publish_status("waiting", pending_rooms=len(pending_finalize))
     if stop_requested():
         log("收到停止请求，当前段已完成，原数据保留")
         break
+    if batch_ready and len(pending_finalize) >= BATCH_ROOMS:
+        log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
+        pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
+        log(f"   批量归档结束，{len(pending_finalize)} 间未通过校验留在队列\n")
+        publish_status("waiting", pending_rooms=len(pending_finalize))
+        batch_ready = False
     now = time.time()
     # 优先挑已录过+冷却完的，其次新房
     hot = []   # 已录过且冷却完了（需要第2/3段）
@@ -607,6 +623,9 @@ while True:
     url, lid, count, total = random.choice(candidates)
     seg_name = SEG_NAMES[count] if count < len(SEG_NAMES) else f"第{count+1}段"
     log(f"\n🎯 {seg_name} room_{lid}")
+    publish_status("scanning", live_id=lid, segment_index=count + 1,
+                   planned_duration_seconds=MAX_MIN * 60, elapsed_seconds=0,
+                   remaining_seconds=MAX_MIN * 60, reason="")
 
     # 扫码
     try: ok_scan = scan_room(url, lid)
@@ -614,6 +633,8 @@ while True:
         log("  扫码异常"); last_record[lid] = now; time.sleep(5); continue
     if not ok_scan:
         log("  不可录"); last_record[lid] = now
+        publish_status("waiting", reason="未取得目标直播流或未通过数字人筛选",
+                       next_retry_t=now + COOLDOWN_SEC)
         if login_expired():
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
@@ -622,6 +643,8 @@ while True:
     # 录制
     if stop_requested():
         break
+    if pause_requested(PAUSE_FILE):
+        continue
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
     surl = state["stream_url"].get("url", "")
     rec_start_t = time.time()
@@ -643,11 +666,8 @@ while True:
         log(f"📀 room_{lid} {new_count}/{total} 轮")
         if new_count >= total:
             pending_finalize.append(lid)
+            batch_ready = len(pending_finalize) >= BATCH_ROOMS
             log(f"  📋 加入归档队列 ({len(pending_finalize)}/{BATCH_ROOMS})")
-            if len(pending_finalize) >= BATCH_ROOMS:
-                log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
-                pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
-                log(f"   批量归档结束，{len(pending_finalize)} 间未通过校验留在队列\n")
         last_record[lid] = rec_start_t
         url_pool = read_urls()  # 重载
     else:

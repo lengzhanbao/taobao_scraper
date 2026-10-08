@@ -52,7 +52,9 @@ PLAYWRIGHT_CORE_PATH = os.environ.get("LIVE_PLAYWRIGHT_CORE_PATH", None)
 MAX_MIN = _get_env_int("LIVE_MAX_MIN", 20)              # minutes recorded per segment
 MAX_ROUND = _get_env_int("LIVE_MAX_ROUND", 3)
 MAX_ROUND_OVERRIDE = os.environ.get("LIVE_MAX_ROUND_OVERRIDE") == "1"
-BATCH_ROOMS = max(6, _get_env_int("LIVE_BATCH_ROOMS", 6))
+BATCH_ROOMS = _get_env_int("LIVE_BATCH_ROOMS", 6)
+if BATCH_ROOMS <= 0:
+    raise ValueError("LIVE_BATCH_ROOMS 必须是正整数")
 COOLDOWN_SEC = _get_env_int("LIVE_COOLDOWN_SEC", 120 * 60)
 PRODUCT_MIN_SEC = _get_env_int("LIVE_PRODUCT_MIN_SEC", 0)
 MAX_COLLECTED = _get_env_int("LIVE_MAX_COLLECTED", 800)

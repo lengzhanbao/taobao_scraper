@@ -80,7 +80,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                 process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                            stderr=ferr, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 publish_status("connecting", live_id=live_id, segment_index=segment_index,
-                               ffmpeg_pid=process.pid, recording_id=recording_id, record_start_t=start_t)
+                               ffmpeg_pid=process.pid, recording_id=recording_id, record_start_t=start_t,
+                               planned_duration_seconds=max_minutes * 60, elapsed_seconds=0,
+                               remaining_seconds=max_minutes * 60)
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline and process.poll() is None:
                     if video.is_file() and video.stat().st_size > 1024:
@@ -151,6 +153,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
     if current:
         timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(end_t - start_t, 1)))
     try:
+        publish_status("validating", elapsed_seconds=round(end_t - start_t), remaining_seconds=0)
         if first_data_t is None or failure is not None or journal_error:
             raise ValueError(failure or "接流失败或响应日志写入失败")
         duration = probe_video(video, ffprobe)
@@ -168,6 +171,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "captured_count": len(responses), "responses": responses,
         }
         atomic_json(attempt_dir / f"data_{ts}_final.json", payload)
+        publish_status("segment_completed", video_duration_seconds=duration)
         log(f"  ✅ {seg_name} 完成，ffprobe 时长 {duration:.1f} 秒；原始视频保留")
         return True
     except Exception as error:
@@ -176,4 +180,5 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "valid": False, "error": str(error), "record_start_t": start_t, "record_end_t": end_t,
         })
         log(f"  本段未计入有效段，全部文件保留: {error}")
+        publish_status("segment_failed", reason=str(error))
         return False

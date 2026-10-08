@@ -20,9 +20,20 @@ import webbrowser
 
 from src.control.settings import ROOT, defaults, validate, read_url_list, build_environment
 from src.utils.safe_io import atomic_json
+from src.crawler.runtime_control import pause_requested
 
 CONTROL = ROOT / "_control"
+VERSION = "2.2-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
+
+
+def summarize_rows(rows):
+    target = sum(row["target"] for row in rows)
+    completed = sum(min(row["count"], row["target"]) for row in rows)
+    return {"rooms": len(rows), "complete": sum(r["count"] >= r["target"] for r in rows),
+            "recorded": sum(r["count"] for r in rows), "remaining": target - completed,
+            "target_segments": target, "completed_segments": completed,
+            "progress_percent": round(completed * 100 / target, 1) if target else 0}
 
 
 def load_json(path, fallback):
@@ -109,10 +120,11 @@ class Manager:
             self.check_cache = None
             return self.settings
 
-    def url_rows(self, instance):
-        source = Path(self.settings["study_root"]) / "_config" / instance["urls_file"]
+    def url_rows(self, instance, config=None, snapshot=None):
+        config = config or self.settings
+        source = snapshot or Path(config["study_root"]) / "_config" / instance["urls_file"]
         rows = read_url_list(source, instance["segments"])
-        progress = load_json(Path(self.settings["study_root"]) / "_control" /
+        progress = load_json(Path(config["study_root"]) / "_control" /
                              f"progress_{instance['port']}.json", {})
         for row in rows:
             row["count"] = max(row["count"], progress.get(row["live_id"], {}).get("count", 0))
@@ -127,6 +139,8 @@ class Manager:
             if not alive and phase not in TERMINAL_PHASES:
                 phase = "exited"
             jobs.append(dict(job, status=status, phase=phase, alive=alive,
+                             pause_supported=bool(job.get("pause_file")),
+                             pause_requested=pause_requested(job.get("pause_file")),
                              stop_requested=Path(job["stop_file"]).is_file()))
         return jobs
 
@@ -214,9 +228,11 @@ class Manager:
                 snapshot.write_text("".join(f"{r['url']},已录制{r['count']}/{r['target']}\n" for r in rows), encoding="utf-8")
                 status_path = run_dir / f"status_{instance['id']}.json"
                 stop_path = run_dir / f"stop_{instance['id']}.request"
+                pause_path = run_dir / f"pause_{instance['id']}.json"
+                atomic_json(pause_path, {"paused": False})
                 log_path = run_dir / f"crawler_{instance['id']}.log"
                 env = dict(os.environ)
-                env.update(build_environment(config, instance, snapshot, status_path, stop_path, run_id))
+                env.update(build_environment(config, instance, snapshot, status_path, stop_path, run_id, pause_path))
                 delay = index * config["launch_gap_seconds"]
                 command = [config["python"], "-B", str(ROOT / "src" / "crawler" / "taobao_crawler.py"),
                            instance["urls_file"], str(instance["port"]), str(delay)]
@@ -227,7 +243,8 @@ class Manager:
                                                start_new_session=os.name != "nt")
                 job = {"instance_id": instance["id"], "port": instance["port"], "pid": process.pid,
                        "birth": process_birth(process.pid), "status_file": str(status_path),
-                       "stop_file": str(stop_path), "log_file": str(log_path), "urls_file": str(snapshot)}
+                       "stop_file": str(stop_path), "pause_file": str(pause_path),
+                       "log_file": str(log_path), "urls_file": str(snapshot)}
                 self.children[process.pid] = process
                 run["jobs"].append(job)
                 atomic_json(self.control / "active_run.json", run, backup=True)
@@ -242,19 +259,41 @@ class Manager:
                     count += 1
             return {"requested": count, "message": "已请求录完当前段后停止"}
 
+    def set_paused(self, instance_id, paused):
+        with self.lock:
+            if type(instance_id) is not int or not 1 <= instance_id <= 5:
+                raise ValueError("实例编号必须是 1—5 的整数")
+            job = next((j for j in self.jobs() if j["instance_id"] == instance_id and j["alive"]), None)
+            if not job:
+                raise ValueError("该实例没有正在运行的任务")
+            if job["stop_requested"]:
+                raise ValueError("该实例已请求停止，请等待退出后再启动")
+            if not job["pause_supported"]:
+                raise ValueError("该任务由旧版本启动，暂停功能在下次启动时生效")
+            path = Path(job["pause_file"])
+            if not path.resolve().is_relative_to(self.control.resolve()):
+                raise ValueError("暂停控制路径无效")
+            atomic_json(path, {"paused": paused, "updated_t": time.time()}, backup=True)
+            return {"instance_id": instance_id, "paused": paused,
+                    "message": f"实例 {instance_id} " + ("已请求暂停，录完当前段后生效" if paused else "已请求继续采集")}
+
     def state(self):
         with self.lock:
             totals = {"rooms": 0, "completed_rooms": 0, "recorded_segments": 0, "remaining_segments": 0}
             instances = []
             distinct = {}
+            jobs = self.jobs()
             for instance in self.settings["instances"]:
-                rows = self.url_rows(instance)
-                complete = sum(r["count"] >= r["target"] for r in rows)
-                recorded = sum(r["count"] for r in rows)
-                remaining = sum(max(0, r["target"] - r["count"]) for r in rows)
-                instances.append(dict(instance, rooms=len(rows), complete=complete,
-                                      recorded=recorded, remaining=remaining))
-                if instance["enabled"]:
+                job = next((j for j in jobs if j["instance_id"] == instance["id"] and j["alive"]), None)
+                if job:
+                    config = self.run["settings"]
+                    running_instance = next(i for i in config["instances"] if i["id"] == instance["id"])
+                    rows = self.url_rows(running_instance, config, job["urls_file"])
+                else:
+                    rows = self.url_rows(instance)
+                instances.append(dict(instance, **summarize_rows(rows),
+                                      progress_source="本次运行" if job else "当前设置"))
+                if instance["enabled"] or job:
                     for row in rows:
                         previous = distinct.get(row["live_id"], {"count": 0, "target": 0})
                         distinct[row["live_id"]] = {"count": max(previous["count"], row["count"]),
@@ -263,9 +302,13 @@ class Manager:
             totals["completed_rooms"] = sum(r["count"] >= r["target"] for r in distinct.values())
             totals["recorded_segments"] = sum(r["count"] for r in distinct.values())
             totals["remaining_segments"] = sum(max(0, r["target"] - r["count"]) for r in distinct.values())
+            totals["target_segments"] = sum(r["target"] for r in distinct.values())
+            totals["completed_segments"] = sum(min(r["count"], r["target"]) for r in distinct.values())
+            totals["progress_percent"] = (round(totals["completed_segments"] * 100 / totals["target_segments"], 1)
+                                          if totals["target_segments"] else 0)
             return {"settings": self.settings, "instances": instances, "totals": totals,
-                    "jobs": self.jobs(), "preflight": self.check_cache,
-                    "version": "2.1-local-panel", "code_root": str(ROOT),
+                    "jobs": jobs, "preflight": self.check_cache,
+                    "version": VERSION, "code_root": str(ROOT),
                     "run_id": self.run.get("run_id"), "server_time": time.time()}
 
     def log_tail(self, instance_id):
@@ -328,6 +371,8 @@ def handler_for(manager, token, expected_origin):
                 actions = {"/api/settings": lambda: manager.save(body),
                            "/api/check": manager.preflight, "/api/start": manager.start,
                            "/api/stop": manager.stop}
+                actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True)
+                actions["/api/resume"] = lambda: manager.set_paused(body.get("instance_id"), False)
                 if self.path not in actions:
                     return self.reply(404, {"error": "操作不存在"})
                 return self.reply(200, actions[self.path]())
@@ -363,7 +408,7 @@ def main():
         try:
             with urlopen(origin + "/api/state", timeout=2) as response:
                 state = json.load(response)
-            if state.get("code_root") == str(ROOT) and state.get("version") == "2.1-local-panel" and args.open:
+            if state.get("code_root") == str(ROOT) and state.get("version", "").endswith("-local-panel") and args.open:
                 webbrowser.open(origin)
         except Exception:
             pass
