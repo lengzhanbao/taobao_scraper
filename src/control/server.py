@@ -1,6 +1,7 @@
 """Loopback-only, standard-library dashboard. Crawlers start only on explicit clicks."""
 import argparse
 import ctypes
+from datetime import datetime
 import importlib.util
 import json
 import os
@@ -23,11 +24,28 @@ from src.utils.safe_io import atomic_json, digest
 from src.utils.segment_evidence import (EvidenceCache, validation_matches, digital_observation,
                                        observation_counts, inspect_archive)
 from src.crawler.runtime_control import pause_requested
-from src.control.url_lists import inspect as inspect_urls, save_list, correct_count, canonical_live_id
+from src.control.url_lists import (inspect as inspect_urls, save_list, correct_count,
+                                   canonical_live_id, url_file_lock)
+from src.control.event_store import EventWriter, read_event_page, utc_now
+from src.control.operation_store import OperationStore
 
 CONTROL = ROOT / "_control"
 VERSION = "2.6-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
+OPERATION_STATUSES = {"accepted", "pending", "applied", "failed", "superseded", "timed_out"}
+
+
+def _parse_utc_epoch(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return time.time()
+
+
+def _receipt_matches(request, receipt):
+    return bool(isinstance(request, dict) and isinstance(receipt, dict)
+                and all(receipt.get(field) == request.get(field)
+                        for field in ("run_id", "instance_id", "operation_id", "command_seq")))
 
 
 def summarize_rows(rows):
@@ -297,6 +315,8 @@ class Manager:
         self.check_cache = None
         self._archive_cache = ("", 0, {})
         self.evidence_cache = EvidenceCache()
+        self._event_writers = {}
+        self._event_writers_lock = threading.Lock()
 
     def save(self, config):
         with self.lock:
@@ -462,16 +482,31 @@ class Manager:
 
     def jobs(self):
         jobs = []
+        run_dir = self._run_dir()
+        run_id = self.run.get("run_id")
+        store = self._operation_store() if run_id else None
         for job in self.run.get("jobs", []):
-            status = load_json(job["status_file"], {})
+            status = load_json(job.get("status_file", ""), {})
             alive = bool(job.get("birth") and process_birth(job["pid"]) == job["birth"])
             phase = status.get("phase", "starting")
             if not alive and phase not in TERMINAL_PHASES:
                 phase = "exited"
+            operation_rows = []
+            if store:
+                operation_rows = [self._operation_view(row, store, run_dir, job)
+                                  for row in store.list_requests(run_id)
+                                  if row.get("instance_id") == job.get("instance_id")]
+            last = operation_rows[-1] if operation_rows else None
+            pending_pause = (last and last.get("operation") in ("pause", "resume")
+                             and last.get("status") in ("accepted", "pending", "timed_out"))
+            pause_state = pause_requested(job.get("pause_file"))
+            if pending_pause:
+                pause_state = bool(last.get("desired_state"))
             jobs.append(dict(job, status=status, phase=phase, alive=alive,
                              pause_supported=bool(job.get("pause_file")),
-                             pause_requested=pause_requested(job.get("pause_file")),
-                             stop_requested=Path(job["stop_file"]).is_file()))
+                             pause_requested=pause_state,
+                             stop_requested=Path(job["stop_file"]).is_file(),
+                             operations=operation_rows[-20:]))
         return jobs
 
     def active(self):
@@ -546,10 +581,16 @@ class Manager:
             run_dir = self.control / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=False)
             atomic_json(run_dir / "settings_snapshot.json", config)
-            run = {"run_id": run_id, "started_t": time.time(), "settings": config, "jobs": []}
+            run = {"run_id": run_id, "run_dir": str(run_dir), "started_t": time.time(),
+                   "settings": config, "jobs": [], "created_at": utc_now()}
             # Save every successfully spawned child immediately, including partial launch failures.
             self.run = run
             atomic_json(self.control / "active_run.json", run, backup=True)
+            atomic_json(run_dir / "run.json", {"run_id": run_id, "run_dir": str(run_dir),
+                                                "started_t": run["started_t"], "created_at": run["created_at"],
+                                                "settings": config, "jobs": []})
+            self._emit_event(run_id, None, status="run_started", source="controller",
+                             details={"instances": []})
             for index, instance in enumerate(i for i in config["instances"] if i["enabled"]):
                 rows = self.url_rows(instance)
                 if not any(row["count"] < row["target"] for row in rows):
@@ -559,10 +600,17 @@ class Manager:
                 status_path = run_dir / f"status_{instance['id']}.json"
                 stop_path = run_dir / f"stop_{instance['id']}.request"
                 pause_path = run_dir / f"pause_{instance['id']}.json"
+                command_path = run_dir / f"command_{instance['id']}.json"
+                command_lock_path = run_dir / f"commands_lock_{instance['id']}"
+                event_dir = run_dir / "events"
+                receipt_dir = run_dir / "operation_receipts" / f"instance_{instance['id']}"
                 atomic_json(pause_path, {"paused": False})
                 log_path = run_dir / f"crawler_{instance['id']}.log"
                 env = dict(os.environ)
-                env.update(build_environment(config, instance, snapshot, status_path, stop_path, run_id, pause_path))
+                env.update(build_environment(config, instance, snapshot, status_path, stop_path, run_id,
+                                             pause_path, command_path=command_path,
+                                             command_lock=command_lock_path, event_dir=event_dir,
+                                             receipt_dir=receipt_dir))
                 delay = index * config["launch_gap_seconds"]
                 command = [config["python"], "-B", str(ROOT / "src" / "crawler" / "taobao_crawler.py"),
                            instance["urls_file"], str(instance["port"]), str(delay)]
@@ -574,22 +622,265 @@ class Manager:
                 job = {"instance_id": instance["id"], "port": instance["port"], "pid": process.pid,
                        "birth": process_birth(process.pid), "status_file": str(status_path),
                        "stop_file": str(stop_path), "pause_file": str(pause_path),
-                       "log_file": str(log_path), "urls_file": str(snapshot)}
+                       "command_file": str(command_path), "event_dir": str(event_dir),
+                       "receipt_dir": str(receipt_dir), "log_file": str(log_path), "urls_file": str(snapshot)}
                 self.children[process.pid] = process
                 run["jobs"].append(job)
                 atomic_json(self.control / "active_run.json", run, backup=True)
+                run_meta = load_json(run_dir / "run.json", {})
+                run_meta["jobs"] = run["jobs"]
+                atomic_json(run_dir / "run.json", run_meta)
+                self._emit_event(run_id, instance["id"], status="instance_started", source="controller",
+                                 details={"pid": process.pid, "port": instance["port"]})
             return run
 
-    def stop(self):
+    def _run_dir(self, run=None):
+        run = run or self.run
+        candidate = run.get("run_dir")
+        if candidate:
+            path = Path(candidate)
+        elif run.get("run_id"):
+            path = self.control / "runs" / str(run["run_id"])
+        else:
+            return None
+        root = (self.control / "runs").resolve()
+        resolved = path.resolve()
+        return resolved if resolved.is_relative_to(root) else None
+
+    def _event_writer(self, run_id, instance_id):
+        writer_id = "controller" if instance_id is None else f"worker_{instance_id}"
+        key = (str(run_id), writer_id)
+        with self._event_writers_lock:
+            if key not in self._event_writers:
+                run_dir = self._run_dir({"run_id": run_id})
+                if not run_dir:
+                    return None
+                self._event_writers[key] = EventWriter(run_dir / "events", run_id, writer_id, instance_id)
+            return self._event_writers[key]
+
+    def _emit_event(self, run_id, instance_id, *, status, source, operation_id=None,
+                    live_id=None, segment_index=None, recording_id=None, details=None):
+        writer = self._event_writer(run_id, instance_id)
+        if not writer:
+            return None
+        return writer.emit(status=status, source=source, operation_id=operation_id,
+                           live_id=live_id, segment_index=segment_index,
+                           recording_id=recording_id, details=details)
+
+    def _operation_store(self, run=None):
+        run = run or self.run
+        config = run.get("settings") or self.settings
+        return OperationStore(config["study_root"])
+
+    def _operation_timeout(self, operation, run=None):
+        config = (run or self.run).get("settings") or self.settings
+        max_minutes = int(config.get("max_minutes", 20))
+        if operation == "resume":
+            return 30
+        return max(120, max_minutes * 60 + 120)
+
+    def _queue_operation(self, job, operation, operation_id):
+        instance_id = job["instance_id"]
+        run_id = str(self.run.get("run_id", ""))
+        store = self._operation_store()
+        desired = {"pause": True, "resume": False, "stop": "stop"}[operation]
+        request, created = store.create_request(run_id=run_id, instance_id=instance_id,
+                                               operation_id=operation_id, operation=operation,
+                                               desired_state=desired)
+        operation_id = request["operation_id"]
+        if not created:
+            return self._operation_view(request, store, self._run_dir(), job)
+        self._emit_event(run_id, instance_id, status="accepted", source="controller",
+                         operation_id=operation_id, live_id=job.get("status", {}).get("live_id"),
+                         segment_index=job.get("status", {}).get("segment_index"),
+                         recording_id=job.get("status", {}).get("recording_id"),
+                         details={"operation": operation, "command_seq": request["command_seq"]})
+        run_dir = self._run_dir()
+        if not run_dir:
+            store.update_request(instance_id, operation_id, "failed", detail="run 路径无效")
+            return self._operation_view(request, store, run_dir, job)
+        command_path = Path(job.get("command_file") or store.command_path(run_dir, instance_id))
+        command_lock_path = run_dir / f"commands_lock_{instance_id}"
+        try:
+            with url_file_lock(command_lock_path):
+                if operation != "stop" and job.get("stop_requested"):
+                    raise ValueError("该实例已请求停止，停止意图不可由暂停/继续覆盖")
+                if operation in ("pause", "resume"):
+                    previous = load_json(command_path, {})
+                    if (previous.get("operation") in ("pause", "resume")
+                            and previous.get("operation_id") != operation_id):
+                        prior_id = previous.get("operation_id")
+                        prior_seq = previous.get("command_seq")
+                        prior_request = store.get_request(instance_id, prior_id)
+                        prior_ack = store.get_worker_receipt(run_dir, instance_id, prior_id)
+                        if not _receipt_matches(prior_request, prior_ack):
+                            prior = store.update_request(instance_id, prior_id, "superseded",
+                                                         detail=f"被 command_seq {request['command_seq']} 取代")
+                            if prior:
+                                self._emit_event(run_id, instance_id, status="superseded", source="controller",
+                                                 operation_id=prior_id, details={"command_seq": prior_seq,
+                                                 "superseded_by": operation_id})
+                    command = {"run_id": run_id, "instance_id": instance_id,
+                               "operation_id": operation_id, "command_seq": request["command_seq"],
+                               "operation": operation, "desired_state": desired,
+                               "created_at": request["created_at"]}
+                    atomic_json(command_path, command)
+                else:
+                    previous = load_json(command_path, {})
+                    if previous.get("operation") in ("pause", "resume"):
+                        prior_id = previous.get("operation_id")
+                        prior_seq = previous.get("command_seq")
+                        prior_request = store.get_request(instance_id, prior_id)
+                        prior_ack = store.get_worker_receipt(run_dir, instance_id, prior_id)
+                        if not _receipt_matches(prior_request, prior_ack):
+                            prior = store.update_request(instance_id, prior_id, "superseded",
+                                                         detail="停止意图优先于尚未执行的暂停/继续")
+                            if prior:
+                                self._emit_event(run_id, instance_id, status="superseded", source="controller",
+                                                 operation_id=prior_id, details={"command_seq": prior_seq,
+                                                 "superseded_by": operation_id, "reason": "stop_priority"})
+                    stop_path = Path(job["stop_file"])
+                    if not stop_path.resolve().is_relative_to(run_dir):
+                        raise ValueError("停止控制路径无效")
+                    command = {"run_id": run_id, "instance_id": instance_id,
+                               "operation_id": operation_id, "command_seq": request["command_seq"],
+                               "operation": "stop", "desired_state": "stop",
+                               "created_at": request["created_at"]}
+                    atomic_json(stop_path, command)
+            request = store.update_request(instance_id, operation_id, "pending") or request
+            self._emit_event(run_id, instance_id, status="pending", source="controller",
+                             operation_id=operation_id, details={"operation": operation,
+                             "command_seq": request["command_seq"]})
+        except Exception as error:
+            request = store.update_request(instance_id, operation_id, "failed", detail=str(error)) or request
+            self._emit_event(run_id, instance_id, status="failed", source="controller",
+                             operation_id=operation_id, details={"error": str(error)})
+        return self._operation_view(request, store, run_dir, job)
+
+    def _operation_view(self, request, store, run_dir, job=None):
+        if not request:
+            return None
+        receipt = store.get_worker_receipt(run_dir, request["instance_id"], request["operation_id"]) if run_dir else None
+        matches = _receipt_matches(request, receipt)
+        status = receipt.get("status") if matches else request.get("status")
+        return {**request, "status": status,
+                "worker_ack_at": receipt.get("ack_at") if matches else None,
+                "worker_details": receipt.get("details", {}) if matches else {}}
+
+    def reconcile_operations(self, run=None):
+        run = run or self.run
+        run_id = run.get("run_id")
+        if not run_id:
+            return
+        store = self._operation_store(run)
+        run_dir = self._run_dir(run)
+        if run_id == self.run.get("run_id"):
+            jobs_by_id = {job["instance_id"]: job for job in self.jobs()}
+        else:
+            jobs_by_id = {}
+            for job in run.get("jobs", []):
+                status_data = load_json(job.get("status_file", ""), {})
+                alive = bool(job.get("birth") and process_birth(job["pid"]) == job["birth"])
+                jobs_by_id[job["instance_id"]] = dict(job, alive=alive, status=status_data)
+        now = time.time()
+        for request in store.list_requests(run_id):
+            status = request.get("status")
+            receipt = store.get_worker_receipt(run_dir, request["instance_id"], request["operation_id"])
+            if _receipt_matches(request, receipt):
+                ack_status = receipt.get("status")
+                if ack_status in ("applied", "failed", "superseded") and status != ack_status:
+                    store.update_request(request["instance_id"], request["operation_id"], ack_status,
+                                         detail=receipt.get("details", {}).get("message"))
+                continue
+            if status not in ("accepted", "pending"):
+                continue
+            job = jobs_by_id.get(request["instance_id"], {})
+            if not job.get("alive"):
+                failed = store.update_request(request["instance_id"], request["operation_id"], "failed",
+                                              detail="worker exited before acknowledgment")
+                if failed:
+                    self._emit_event(run_id, request["instance_id"], status="failed", source="controller",
+                                     operation_id=request["operation_id"], details={"error": failed.get("detail")})
+                continue
+            age = now - _parse_utc_epoch(request.get("created_at"))
+            if age > self._operation_timeout(request.get("operation"), self.run):
+                timed_out = store.update_request(request["instance_id"], request["operation_id"], "timed_out",
+                                                 detail="尚未收到 worker 确认；命令仍有效，不自动重发")
+                if timed_out:
+                    self._emit_event(run_id, request["instance_id"], status="timed_out", source="controller",
+                                     operation_id=request["operation_id"], details={"age_seconds": int(age)})
+
+    def operation_list(self, run_id):
+        run_dir = self._run_dir({"run_id": run_id})
+        if not run_dir or not run_dir.is_dir():
+            raise ValueError("运行记录不存在")
+        metadata = load_json(run_dir / "run.json", {})
+        config = metadata.get("settings") or load_json(run_dir / "settings_snapshot.json", {})
+        if not config.get("study_root"):
+            return []
+        run_data = metadata or {"run_id": run_id, "run_dir": str(run_dir),
+                                "settings": config, "jobs": []}
+        store = OperationStore(config["study_root"])
+        self.reconcile_operations(run_data)
+        return [self._operation_view(row, store, run_dir) for row in store.list_requests(run_id)]
+
+    def run_list(self):
+        runs_root = self.control / "runs"
+        results = []
+        if not runs_root.is_dir():
+            return results
+        for run_dir in sorted((path for path in runs_root.iterdir() if path.is_dir()), reverse=True):
+            run_id = run_dir.name
+            if not re.fullmatch(r"\d{8}_\d{6}_[A-Za-z0-9]+", run_id):
+                continue
+            metadata = load_json(run_dir / "run.json", {})
+            settings = metadata.get("settings") or load_json(run_dir / "settings_snapshot.json", {})
+            results.append({"run_id": run_id, "created_at": metadata.get("created_at"),
+                            "started_t": metadata.get("started_t"),
+                            "instances": [job.get("instance_id") for job in metadata.get("jobs", [])],
+                            "study_root": settings.get("study_root"), "current": run_id == self.run.get("run_id")})
+        return results
+
+    def timeline_page(self, run_id, *, cursor=None, limit=100, instance_id=None):
+        run_dir = self._run_dir({"run_id": run_id})
+        if not run_dir or not run_dir.is_dir():
+            raise ValueError("运行记录不存在")
+        return read_event_page(run_dir / "events", cursor=cursor, limit=limit, instance_id=instance_id)
+
+    def stop(self, operation_id=None):
         with self.lock:
             count = 0
+            operation_id = OperationStore.normalize_id(operation_id)
+            operations = []
+            reused_existing = False
             for job in self.jobs():
                 if job["alive"]:
-                    Path(job["stop_file"]).write_text("finish_current_segment\n", encoding="utf-8")
-                    count += 1
-            return {"requested": count, "message": "已请求录完当前段后停止"}
+                    stop_path = Path(job["stop_file"])
+                    if stop_path.exists():
+                        previous_stop = load_json(stop_path, {})
+                        if (previous_stop.get("run_id") == self.run.get("run_id")
+                                and previous_stop.get("operation") == "stop"
+                                and previous_stop.get("operation_id")):
+                            store = self._operation_store()
+                            previous_request = store.get_request(job["instance_id"],
+                                                                 previous_stop["operation_id"])
+                            operations.append(self._operation_view(previous_request, store,
+                                                                   self._run_dir(), job))
+                        else:
+                            operations.append({"instance_id": job["instance_id"], "operation": "stop",
+                                               "status": "pending", "detail": "既有停止请求标记保留，未覆盖"})
+                        count += 1
+                        reused_existing = True
+                        continue
+                    result = self._queue_operation(job, "stop", operation_id)
+                    operations.append(result)
+                    if result and result.get("status") in ("pending", "accepted", "timed_out", "applied"):
+                        count += 1
+            message = "已有停止请求正在等待生效" if reused_existing else "已请求录完当前段后停止"
+            return {"requested": count, "operation_id": operation_id, "operations": operations,
+                    "message": message}
 
-    def set_paused(self, instance_id, paused):
+    def set_paused(self, instance_id, paused, operation_id=None):
         with self.lock:
             if type(instance_id) is not int or not 1 <= instance_id <= 5:
                 raise ValueError("实例编号必须是 1—5 的整数")
@@ -600,15 +891,19 @@ class Manager:
                 raise ValueError("该实例已请求停止，请等待退出后再启动")
             if not job["pause_supported"]:
                 raise ValueError("该任务由旧版本启动，暂停功能在下次启动时生效")
-            path = Path(job["pause_file"])
-            if not path.resolve().is_relative_to(self.control.resolve()):
+            run_dir = self._run_dir()
+            if not run_dir or not Path(job["pause_file"]).resolve().is_relative_to(run_dir):
                 raise ValueError("暂停控制路径无效")
-            atomic_json(path, {"paused": paused, "updated_t": time.time()}, backup=True)
-            return {"instance_id": instance_id, "paused": paused,
-                    "message": f"实例 {instance_id} " + ("已请求暂停，录完当前段后生效" if paused else "已请求继续采集")}
+            operation = "pause" if paused else "resume"
+            result = self._queue_operation(job, operation, OperationStore.normalize_id(operation_id))
+            result["paused"] = paused
+            result["message"] = (f"实例 {instance_id} 已请求暂停，录完当前段后生效" if paused
+                                  else f"实例 {instance_id} 已请求继续采集")
+            return result
 
     def state(self):
         with self.lock:
+            self.reconcile_operations()
             totals = {"rooms": 0, "completed_rooms": 0, "recorded_segments": 0,
                       "remaining_segments": 0, "valid_segments": 0, "archived_segments": 0}
             instances = []
@@ -660,8 +955,13 @@ class Manager:
             totals["progress_percent"] = (round(completed_valid * 100 / totals["target_segments"], 1)
                                           if totals["target_segments"] and
                                           (known_counts or not unverified_rooms) else None)
+            run_id = str(self.run.get("run_id", ""))
+            controller_gap = any(writer.telemetry_gap for (writer_run, _), writer in self._event_writers.items()
+                                 if writer_run == run_id)
+            worker_gap = any(job.get("status", {}).get("telemetry_gap") for job in jobs)
             return {"settings": self.settings, "instances": instances, "totals": totals,
                     "jobs": jobs, "preflight": self.check_cache,
+                    "telemetry_gap": bool(controller_gap or worker_gap),
                     "version": VERSION, "code_root": str(ROOT),
                     "server_pid": os.getpid(),
                     "run_id": self.run.get("run_id"), "server_time": time.time()}
@@ -701,6 +1001,20 @@ def handler_for(manager, token, expected_origin):
                     state = manager.state()
                     state["token"] = token
                     return self.reply(200, state)
+                if url.path == "/api/runs":
+                    return self.reply(200, {"runs": manager.run_list()})
+                if url.path == "/api/events":
+                    query = parse_qs(url.query)
+                    run_id = query.get("run_id", [""])[0]
+                    instance_text = query.get("instance", [""])[0]
+                    instance_id = int(instance_text) if instance_text else None
+                    cursor = query.get("cursor", [""])[0] or None
+                    limit = int(query.get("limit", ["100"])[0])
+                    return self.reply(200, manager.timeline_page(run_id, cursor=cursor,
+                                                                 limit=limit, instance_id=instance_id))
+                if url.path == "/api/operations":
+                    run_id = parse_qs(url.query).get("run_id", [""])[0]
+                    return self.reply(200, {"operations": manager.operation_list(run_id)})
                 if url.path == "/api/log":
                     return self.reply(200, {"text": manager.log_tail(int(parse_qs(url.query).get("instance", [1])[0]))})
                 if url.path == "/api/urls":
@@ -727,9 +1041,11 @@ def handler_for(manager, token, expected_origin):
                 body = json.loads(self.rfile.read(length))
                 actions = {"/api/settings": lambda: manager.save(body),
                            "/api/check": manager.preflight, "/api/start": manager.start,
-                           "/api/stop": manager.stop}
-                actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True)
-                actions["/api/resume"] = lambda: manager.set_paused(body.get("instance_id"), False)
+                           "/api/stop": lambda: manager.stop(body.get("operation_id"))}
+                actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True,
+                                                                     body.get("operation_id"))
+                actions["/api/resume"] = lambda: manager.set_paused(body.get("instance_id"), False,
+                                                                      body.get("operation_id"))
                 actions['/api/urls'] = lambda: manager.save_urls(body)
                 actions['/api/urls/correct-count'] = lambda: manager.correct_url_count(body)
                 if self.path not in actions:

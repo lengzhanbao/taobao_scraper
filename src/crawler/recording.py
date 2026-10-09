@@ -39,7 +39,7 @@ def product_in(response, live_id):
 
 def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_name,
                    ffmpeg, ffprobe, max_minutes, user_agent, cookie_header,
-                   state, lock, page, log, publish_status):
+                   state, lock, page, log, publish_status, run_id=None):
     recording_id = uuid.uuid4().hex
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     attempt_dir = Path(room_dir) / seg_name / ("attempt_" + ts + "_" + recording_id[:8])
@@ -129,7 +129,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                         next_refresh = time.monotonic() + 300
                     if time.monotonic() >= next_checkpoint:
                         atomic_json(attempt_dir / f"data_{ts}.json", {
-                            "recording_id": recording_id, "segment_index": segment_index,
+                            "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
                             "live_url": url, "record_start_t": start_t, "record_end_t": time.time(),
                             "recorded_files": [str(video)], "responses_journal": str(journal_path),
                             "responses": list(state["collected"]), "product_timeline": timeline,
@@ -162,7 +162,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
         with journal_path.open(encoding="utf-8") as stream:
             responses = [json.loads(line) for line in stream if line.strip()]
         payload = {
-            "recording_id": recording_id, "segment_index": segment_index,
+            "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
             "live_url": url, "recorded_files": [str(video)],
             "record_start_t": start_t, "record_end_t": end_t, "first_video_data_t": first_data_t,
             "video_duration_seconds": duration, "timing_basis": "wall_clock_from_ffmpeg_launch",
@@ -182,7 +182,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
         except (OSError, ValueError):
             failed_responses = list(state["collected"])
         atomic_json(attempt_dir / "attempt_status.json", {
-            "recording_id": recording_id, "segment_index": segment_index,
+            "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
             "valid": False, "error": str(error), "record_start_t": start_t, "record_end_t": end_t,
             "digital_observation": digital_observation({"record_start_t": start_t,
                 "record_end_t": end_t, "responses": failed_responses}, live_id),

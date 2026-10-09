@@ -13,9 +13,18 @@ let urlStatsGeneration = 0;
 let urlStatsController = null;
 let urlStatsPromise = null;
 let urlStatsQueued = false;
+let timelineCursor = null;
+let timelineRunId = "";
+let timelineHasMore = false;
+let timelineBusy = false;
+const timelineItems = new Map();
 const $ = id => document.getElementById(id);
 const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
 function message(text, error=false) { $("message").hidden=false; $("message").textContent=text; $("message").classList.toggle("error",error); }
+function newOperationId() {
+  if(typeof crypto!="undefined"&&crypto.randomUUID)return crypto.randomUUID();
+  return "op-"+Date.now()+"-"+Math.random().toString(36).slice(2);
+}
 async function api(path, data, requestController=null) {
   const controller = requestController || new AbortController();
   const timeout = setTimeout(()=>controller.abort(),data===undefined?10000:90000);
@@ -205,12 +214,12 @@ async function action(fn) {
 $("settings-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{await api("/api/settings",settingsFromForm());dirty=false;$("save-note").textContent="已保存";message("设置已保存。运行中的实例沿用本次启动快照。");});});
 $("check").addEventListener("click",()=>action(async()=>{if(dirty)throw new Error("先保存当前设置，再检查环境。");const result=await api("/api/check",{});renderChecks(result);message(result.ok?"环境检查通过，可以启动采集。":"有启动条件未满足，请查看环境检查。",!result.ok);}));
 $("start").addEventListener("click",()=>action(async()=>{if(dirty)throw new Error("请先保存当前设置。");await api("/api/start",{});message("采集已启动。无需保持页面或命令行窗口打开。");}));
-$("stop").addEventListener("click",()=>action(async()=>{const result=await api("/api/stop",{});message(result.message+"；不会强制中断当前视频。");}));
-$("instance-rows").addEventListener("click",event=>{const button=event.target.closest("button.instance-control");if(!button||button.disabled)return;const instanceId=Number(button.dataset.instance);const operation=button.dataset.operation;action(async()=>{const result=await api("/api/"+operation,{instance_id:instanceId});message(result.message);});});
+$("stop").addEventListener("click",()=>action(async()=>{const result=await api("/api/stop",{operation_id:newOperationId()});message(result.message+"；worker 确认和停止完成状态见事件时间线。");}));
+$("instance-rows").addEventListener("click",event=>{const button=event.target.closest("button.instance-control");if(!button||button.disabled)return;const instanceId=Number(button.dataset.instance);const operation=button.dataset.operation;action(async()=>{const result=await api("/api/"+operation,{instance_id:instanceId,operation_id:newOperationId()});message(result.message);});});
 $("refresh-log").addEventListener("click",()=>logRefresh().catch(e=>message(e.message,true)));
 $("log-instance").addEventListener("change",()=>logRefresh().catch(e=>message(e.message,true)));
 refresh().catch(e=>message("无法连接控制台："+e.message,true));
-setInterval(()=>{if(!busy){refresh().catch(()=>{});refreshUrlStats();}},5000);
+setInterval(()=>{if(!busy){refresh().catch(()=>{});refreshUrlStats();timelineRefresh();}},5000);
 setInterval(()=>{if(!busy)logRefresh().catch(()=>{});},7000);
 
 function digitalMarkerText(markers, validCount) {
@@ -340,3 +349,101 @@ function preset(short) {
 }
 $("preset-study").addEventListener("click",()=>{if(state&&!busy)preset(false);});
 $("preset-short").addEventListener("click",()=>{if(state&&!busy)preset(true);});
+
+const operationStatusNames={accepted:"已接受",pending:"执行中",applied:"worker 已确认",
+  failed:"失败",superseded:"被取代",timed_out:"超时未确认"};
+function timelineStatusName(status) { return operationStatusNames[status]||phaseNames[status]||status||"事件"; }
+function timelineReset(runId) {
+  timelineRunId=runId;timelineCursor=null;timelineHasMore=false;timelineItems.clear();
+  $("timeline-events").replaceChildren();$("timeline-more").hidden=true;
+}
+function timelineAdd(item) {
+  const id=String(item.event_id||"");
+  if(!id||timelineItems.has(id))return;
+  if(item.operation_id&&operationStatusNames[item.status]) {
+    const synthetic=`operation:${item.instance_id}:${item.operation_id}:${item.status}`;
+    timelineItems.delete(synthetic);
+  }
+  timelineItems.set(id,item);
+}
+function timelineRender() {
+  const list=$("timeline-events");list.replaceChildren();
+  const rows=[...timelineItems.values()].sort((a,b)=>String(a.time_utc||a.created_at||"").localeCompare(String(b.time_utc||b.created_at||""))||String(a.event_id).localeCompare(String(b.event_id)));
+  if(!rows.length) {const empty=document.createElement("li");empty.className="timeline-empty";empty.textContent="此运行暂无事件或操作请求。";list.append(empty);return;}
+  for(const item of rows) {
+    const li=document.createElement("li");
+    const time=document.createElement("time");time.className="timeline-time";time.textContent=item.time_utc||item.created_at||"时间未知";
+    const status=document.createElement("strong");status.className="timeline-status "+(item.status||"");status.textContent=timelineStatusName(item.status);
+    const details=document.createElement("span");details.className="timeline-details";
+    const parts=[];
+    if(item.instance_id)parts.push("Edge "+item.instance_id);
+    if(item.operation)parts.push(item.operation);
+    if(item.operation_id)parts.push("操作 "+item.operation_id);
+    if(Number.isInteger(item.command_seq))parts.push("命令序号 "+item.command_seq);
+    if(item.live_id)parts.push("直播 "+item.live_id);
+    if(item.segment_index)parts.push("第 "+item.segment_index+" 段");
+    if(item.recording_id)parts.push("录制 "+item.recording_id);
+    if(item.details&&Object.keys(item.details).length)parts.push(JSON.stringify(item.details));
+    if(item.detail)parts.push(item.detail);
+    if(item.source)parts.push("来源："+item.source);
+    details.textContent=parts.join(" · ");li.append(time,status,details);list.append(li);
+  }
+}
+async function timelineRunsRefresh() {
+  const result=await api("/api/runs");
+  const runs=Array.isArray(result.runs)?result.runs:[];
+  const select=$("timeline-run"), old=select.value;
+  select.replaceChildren();
+  for(const run of runs) {
+    const option=document.createElement("option");option.value=run.run_id;
+    option.textContent=run.run_id+(run.current?" · 当前":"");select.append(option);
+  }
+  const selected=runs.some(run=>run.run_id===old)?old:(runs[0]?.run_id||"");
+  select.value=selected;
+  if(selected!==timelineRunId)timelineReset(selected);
+  return selected;
+}
+async function timelineRefresh(loadMore=false) {
+  if(timelineBusy)return;
+  timelineBusy=true;
+  try {
+    const runId=await timelineRunsRefresh();
+    if(!runId) {timelineRender();return;}
+    const instance=$("timeline-instance").value;
+    const query=new URLSearchParams({run_id:runId,limit:"100"});
+    if(timelineCursor&&!loadMore)query.set("cursor",timelineCursor);
+    if(loadMore&&timelineCursor)query.set("cursor",timelineCursor);
+    if(instance)query.set("instance",instance);
+    const page=await api("/api/events?"+query.toString());
+    for(const item of (page.events||[]))timelineAdd(item);
+    timelineCursor=page.cursor||timelineCursor;timelineHasMore=Boolean(page.has_more);
+    $("timeline-more").hidden=!timelineHasMore;
+    const operations=await api("/api/operations?run_id="+encodeURIComponent(runId));
+    const filterInstance=instance?Number(instance):null;
+    for(const operation of (operations.operations||[])) {
+      if(filterInstance&&operation.instance_id!==filterInstance)continue;
+      const history=Array.isArray(operation.status_history)?operation.status_history:[];
+      for(let index=0;index<history.length;index++) {
+        const step=history[index];
+        const key=`operation:${operation.instance_id}:${operation.operation_id}:${step.status}`;
+        const eventExists=[...timelineItems.values()].some(item=>item.operation_id===operation.operation_id&&item.instance_id===operation.instance_id&&item.status===step.status);
+        if(!eventExists)timelineAdd({...operation,event_id:key,status:step.status,time_utc:step.time_utc,source:"持久回执"});
+      }
+      if(operation.status&&(!history.length||history.at(-1)?.status!==operation.status)) {
+        const key=`operation:${operation.instance_id}:${operation.operation_id}:${operation.status}`;
+        const eventExists=[...timelineItems.values()].some(item=>item.operation_id===operation.operation_id&&item.instance_id===operation.instance_id&&item.status===operation.status);
+        if(!eventExists)timelineAdd({...operation,event_id:key,status:operation.status,
+          time_utc:operation.worker_ack_at||operation.updated_at,source:"持久回执"});
+      }
+    }
+    timelineRender();
+    $("timeline-gap").textContent=(state?.telemetry_gap||state?.jobs?.some(job=>job.status?.telemetry_gap))?"事件遥测有写入缺口；操作回执与当前状态仍可单独核对。":"";
+  } catch(error) {
+    $("timeline-gap").textContent="时间线读取失败："+error.message;
+  } finally { timelineBusy=false; }
+}
+$("timeline-run").addEventListener("change",()=>{timelineReset($("timeline-run").value);timelineRefresh().catch(()=>{});});
+$("timeline-instance").addEventListener("change",()=>{timelineReset($("timeline-run").value);timelineRefresh().catch(()=>{});});
+$("timeline-refresh").addEventListener("click",()=>timelineRefresh().catch(()=>{}));
+$("timeline-more").addEventListener("click",()=>timelineRefresh(true));
+timelineRefresh().catch(()=>{});

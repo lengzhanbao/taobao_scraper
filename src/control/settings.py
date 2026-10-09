@@ -131,8 +131,9 @@ def read_url_list(path, target):
     return list(found.values())
 
 
-def build_environment(config, instance, url_snapshot, status_path, stop_path, run_id, pause_path=None):
-    return {
+def build_environment(config, instance, url_snapshot, status_path, stop_path, run_id, pause_path=None,
+                     command_path=None, command_lock=None, event_dir=None, receipt_dir=None):
+    environment = {
         "LIVE_STUDY_ROOT": config["study_root"], "LIVE_FFMPEG": config["ffmpeg"],
         "LIVE_FFPROBE": config["ffprobe"], "LIVE_EDGE_PATH": config["edge"],
         "LIVE_MAX_MIN": str(config["max_minutes"]), "LIVE_MAX_ROUND": str(instance["segments"]),
@@ -144,3 +145,12 @@ def build_environment(config, instance, url_snapshot, status_path, stop_path, ru
         "LIVE_RUN_ID": run_id, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(ROOT / "_control" / "pycache"),
     }
+    if command_path:
+        environment["LIVE_COMMAND_FILE"] = str(command_path)
+    if command_lock:
+        environment["LIVE_COMMAND_LOCK"] = str(command_lock)
+    if event_dir:
+        environment["LIVE_EVENT_DIR"] = str(event_dir)
+    if receipt_dir:
+        environment["LIVE_OPERATION_RECEIPT_DIR"] = str(receipt_dir)
+    return environment

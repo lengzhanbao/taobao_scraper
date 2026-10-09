@@ -73,6 +73,14 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/control/web/app.js")
 for(const id of ["correct-live-id","correct-count","correct-reason","correct-confirmed","correct-submit",
                  "connection-state","last-sync","verified-note"]) context.document.getElementById(id);
 async function main() {
+  assert.deepEqual(["accepted","pending","applied","failed","superseded","timed_out"].map(status=>
+    vm.runInContext(`timelineStatusName("${status}")`,context)),
+    ["已接受","执行中","worker 已确认","失败","被取代","超时未确认"]);
+  vm.runInContext(`timelineReset("synthetic-run");timelineAdd({event_id:"e1",time_utc:"2026-10-09T00:00:00Z",instance_id:1,operation:"stop",operation_id:"op-stop",command_seq:9,status:"applied",source:"worker",details:{message:"完成当前段后停止"}});timelineRender()`,context);
+  assert.match(elements.get("timeline-events").textContent,/worker 已确认/);
+  assert.match(elements.get("timeline-events").textContent,/操作 op-stop/);
+  assert.match(elements.get("timeline-events").textContent,/命令序号 9/);
+  assert.match(elements.get("timeline-events").textContent,/完成当前段后停止/);
   await vm.runInContext("refresh()",context);
   assert.equal(elements.get('correct-submit').disabled,true);
   assert.equal(elements.get("total-progress").value,50);

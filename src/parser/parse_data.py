@@ -442,7 +442,7 @@ def process_room(room_dir):
         entry.update(segment_index=data.get("segment_index", fi + 1),
                      recording_id=recording_id, duration_seconds=duration)
         archive_entries.append(entry)
-        archive_segments.append({"recording_id": recording_id,
+        archive_segments.append({"run_id": data.get("run_id"), "recording_id": recording_id,
                                  "segment_index": data.get("segment_index", fi + 1),
                                  "raw_json": archive_entries[fi], "video": entry,
                                  "comments": file_evidence(os.path.join(cra_dir, cn)),

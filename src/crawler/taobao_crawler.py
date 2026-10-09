@@ -29,12 +29,13 @@ from src.utils.config import (
 )
 from pathlib import Path
 from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
+from src.control.event_store import EventWriter
 from src.utils.segment_evidence import validation_matches
 from src.utils.digital_flags import (
     find_values_by_key, parse_json_body,
     summarize_digital_flags, title_keywords_in_values,
 )
-from src.crawler.runtime_control import pause_requested, wait_while_paused
+from src.crawler.runtime_control import pause_requested, wait_while_paused, apply_control_command
 URLS_FILE = os.environ.get("LIVE_URLS_FILE", os.path.join(STUDY_ROOT, "_config", sys.argv[1]))
 PORT = int(sys.argv[2])
 COOKIE_JSON = os.environ.get(
@@ -51,26 +52,142 @@ STATUS_FILE = os.environ.get("LIVE_STATUS_FILE")
 STOP_FILE = os.environ.get("LIVE_STOP_FILE")
 PAUSE_FILE = os.environ.get("LIVE_PAUSE_FILE")
 RUN_ID = os.environ.get("LIVE_RUN_ID", "manual")
+COMMAND_FILE = os.environ.get("LIVE_COMMAND_FILE")
+COMMAND_LOCK = os.environ.get("LIVE_COMMAND_LOCK")
+RECEIPT_DIR = os.environ.get("LIVE_OPERATION_RECEIPT_DIR")
+EVENT_DIR = os.environ.get("LIVE_EVENT_DIR")
+INSTANCE_ID = PORT - 9222
+try:
+    EVENTS = EventWriter(EVENT_DIR, RUN_ID, f"worker_{INSTANCE_ID}", INSTANCE_ID) if EVENT_DIR else None
+except OSError:
+    EVENTS = None
+telemetry_gap = bool(EVENT_DIR) and (EVENTS is None or EVENTS.telemetry_gap)
 status_data = {"pid": os.getpid(), "port": PORT, "run_id": RUN_ID}
+processed_state_path = (Path(STATUS_FILE).parent / f"worker_state_{INSTANCE_ID}.json"
+                        if STATUS_FILE else None)
+try:
+    processed_seq = int(json.loads(processed_state_path.read_text(encoding="utf-8")).get("last_command_seq", 0)) if processed_state_path and processed_state_path.exists() else 0
+except (OSError, ValueError, TypeError, AttributeError):
+    processed_seq = 0
+control_local_lock = threading.Lock()
+
+
+def _emit_worker_event(status, *, operation_id=None, details=None):
+    global telemetry_gap
+    if EVENTS:
+        EVENTS.emit(status=status, source="worker", operation_id=operation_id,
+                    live_id=status_data.get("live_id"),
+                    segment_index=status_data.get("segment_index"),
+                    recording_id=status_data.get("recording_id"), details=details)
+        telemetry_gap = EVENTS.telemetry_gap
+
+
+def _write_operation_receipt(command, status, details=None):
+    global telemetry_gap
+    if not RECEIPT_DIR:
+        telemetry_gap = True
+        return False
+    operation_id = command.get("operation_id")
+    try:
+        path = Path(RECEIPT_DIR) / f"{operation_id}.json"
+        atomic_json(path, {"run_id": RUN_ID, "instance_id": INSTANCE_ID,
+                           "operation_id": operation_id, "command_seq": command.get("command_seq"),
+                           "operation": command.get("operation"), "status": status,
+                           "ack_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                           "details": details or {}})
+        _emit_worker_event(status=status, operation_id=operation_id, details=details)
+        return True
+    except OSError:
+        telemetry_gap = True
+        print("操作确认回执写入失败，事件监控存在缺口", flush=True)
+        return False
+
+
+def _load_json_file(path):
+    try:
+        with Path(path).open(encoding="utf-8") as stream:
+            value = json.load(stream)
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def process_pending_command():
+    """Apply only newest pause/resume at a safe checkpoint; stop remains separate."""
+    global processed_seq, telemetry_gap
+    if not COMMAND_FILE or not COMMAND_LOCK or not Path(COMMAND_FILE).is_file():
+        return
+    with control_local_lock:
+        try:
+            if not RECEIPT_DIR or not processed_state_path or not PAUSE_FILE:
+                telemetry_gap = True
+                return
+            processed_seq, command = apply_control_command(
+                COMMAND_FILE, COMMAND_LOCK, STOP_FILE, PAUSE_FILE, RECEIPT_DIR,
+                processed_state_path, run_id=RUN_ID, instance_id=INSTANCE_ID,
+                processed_seq=processed_seq, acknowledge=_write_operation_receipt)
+            if command:
+                receipt = _load_json_file(Path(RECEIPT_DIR) / f"{command.get('operation_id')}.json")
+                publish_status(status_data.get("phase", "starting"),
+                               last_operation_id=command.get("operation_id"),
+                               last_operation_status=receipt.get("status", "pending"),
+                               last_command_seq=command.get("command_seq"))
+        except (OSError, TimeoutError, ValueError) as error:
+            telemetry_gap = True
+            print(f"控制命令读取/锁定失败，事件监控存在缺口: {error}", flush=True)
 
 
 def publish_status(phase, **fields):
     status_data.update(fields)
     status_data.update(phase=phase, updated_t=time.time())
+    previous_phase = status_data.get("_published_phase")
+    if previous_phase != phase:
+        _emit_worker_event(phase, details={key: status_data.get(key) for key in
+                          ("reason", "elapsed_seconds", "remaining_seconds", "video_duration_seconds")
+                          if status_data.get(key) is not None})
+        status_data["_published_phase"] = phase
+    status_data["telemetry_gap"] = bool(telemetry_gap or (EVENTS and EVENTS.telemetry_gap))
     if STATUS_FILE:
         try:
-            atomic_json(STATUS_FILE, status_data)
+            atomic_json(STATUS_FILE, {key: value for key, value in status_data.items()
+                                      if not key.startswith("_")})
         except OSError as error:
             print(f"状态写入失败: {error}", flush=True)
 
 
 def stop_requested():
-    return bool(STOP_FILE and os.path.isfile(STOP_FILE))
+    if not STOP_FILE or not os.path.isfile(STOP_FILE):
+        return False
+    command = _load_json_file(STOP_FILE)
+    if (command.get("run_id") == RUN_ID and command.get("instance_id") == INSTANCE_ID
+            and command.get("operation") == "stop" and type(command.get("command_seq")) is int):
+        receipt = _load_json_file(Path(RECEIPT_DIR) / f"{command.get('operation_id')}.json") if RECEIPT_DIR else {}
+        receipt_matches = (receipt.get("run_id") == RUN_ID
+                           and receipt.get("instance_id") == INSTANCE_ID
+                           and receipt.get("operation_id") == command.get("operation_id")
+                           and receipt.get("command_seq") == command.get("command_seq"))
+        if not receipt_matches or receipt.get("status") != "applied":
+            _write_operation_receipt(command, "applied", {"message": "worker 已收到停止意图；完成当前段后停止"})
+            status_data["last_operation_id"] = command.get("operation_id")
+            status_data["last_operation_status"] = "applied"
+            status_data["last_command_seq"] = command.get("command_seq")
+            status_data["updated_t"] = time.time()
+            status_data["telemetry_gap"] = bool(telemetry_gap or (EVENTS and EVENTS.telemetry_gap))
+            if STATUS_FILE:
+                try:
+                    atomic_json(STATUS_FILE, {key: value for key, value in status_data.items()
+                                              if not key.startswith("_")})
+                except OSError as error:
+                    print(f"状态写入失败: {error}", flush=True)
+    return True
 
 
 def interruptible_wait(seconds):
     deadline = time.monotonic() + max(0, seconds)
-    while time.monotonic() < deadline and not stop_requested() and not pause_requested(PAUSE_FILE):
+    while time.monotonic() < deadline:
+        process_pending_command()
+        if stop_requested() or pause_requested(PAUSE_FILE):
+            break
         time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 # 启动时只报告未完成目录，保留所有原文件。
@@ -353,7 +470,7 @@ def record_room(url, live_id, room_dir, surl, seg_name, segment_index):
         segment_index=segment_index, seg_name=seg_name, ffmpeg=FFMPEG,
         ffprobe=FFPROBE, max_minutes=MAX_MIN, user_agent=UA,
         cookie_header=get_cookie_header(), state=state, lock=capture_lock,
-        page=page, log=log, publish_status=publish_status,
+        page=page, log=log, publish_status=publish_status, run_id=RUN_ID,
     )
 
 def validation_receipt(room_dir, segment_index):
@@ -467,7 +584,8 @@ if stop_requested():
     publish_status("stopped")
     sys.exit(0)
 if not wait_while_paused(PAUSE_FILE, stop_requested=stop_requested,
-                         publish_status=publish_status, log=log):
+                         publish_status=publish_status, log=log,
+                         process_commands=process_pending_command):
     publish_status("stopped")
     sys.exit(0)
 
@@ -619,7 +737,8 @@ if suspect_finalize:
 batch_ready = False
 while True:
     if not wait_while_paused(PAUSE_FILE, stop_requested=stop_requested,
-                             publish_status=publish_status, log=log):
+                             publish_status=publish_status, log=log,
+                             process_commands=process_pending_command):
         break
     publish_status("waiting", pending_rooms=len(pending_finalize))
     if stop_requested():
