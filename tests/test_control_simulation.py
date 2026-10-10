@@ -20,7 +20,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-ARTIFACTS = ROOT / "_control" / "selfchecks" / (time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
+ARTIFACTS = ROOT / "_control" / "_selfchecks" / (time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
 ARTIFACTS.mkdir(parents=True, exist_ok=False)
 os.environ["LIVE_STUDY_ROOT"] = str(ARTIFACTS / "study")
 
@@ -815,6 +815,12 @@ class Checks(unittest.TestCase):
                 def wait(path, **kwargs):
                     return wait_while_paused(path, sleep=pause_sleep, **kwargs)
                 import random
+                retry_state = SimpleNamespace(eligible=lambda *args: (True, 0),
+                                              succeeded=lambda *args: None,
+                                              failed=lambda *args, **kwargs: {
+                                                  "failure_count": 1, "retry_exhausted": False,
+                                                  "last_failure_t": time.time()},
+                                              cooldown_seconds=7200)
                 namespace = {"wait_while_paused": wait, "pause_requested": pause_requested, "PAUSE_FILE": str(path),
                              "stop_requested": lambda: stopped[0], "publish_status": lambda *args, **fields: None,
                              "process_pending_command": lambda: None,
@@ -824,7 +830,8 @@ class Checks(unittest.TestCase):
                              "scan_room": lambda *args: True, "record_room": record, "mark_recorded": mark,
                              "MAX_MIN": 0, "BATCH_ROOMS": threshold, "OUTDIR": str(folder), "os": os,
                              "state": {"stream_url": {"url": "synthetic://stream"}}, "read_urls": lambda: rows,
-                             "finalize_room": archive}
+                             "finalize_room": archive, "retry_state": retry_state,
+                             "status_data": {}, "_emit_worker_event": lambda *args, **kwargs: None}
                 exec(compile(ast.Module(body=[main_loop], type_ignores=[]), "synthetic_main_loop", "exec"), namespace)
                 self.assertEqual(events.count("record_finished"), 1)
                 self.assertIn("marked", events)

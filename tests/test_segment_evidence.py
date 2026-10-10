@@ -21,7 +21,7 @@ from src.utils.segment_evidence import (digital_observation, video_validation, i
                                        EvidenceCache, observation_counts)
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACTS = ROOT / "_control" / "evidence_tests" / (time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
+ARTIFACTS = ROOT / "_control" / "_selfchecks" / ("evidence_" + time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8])
 
 
 @pytest.fixture

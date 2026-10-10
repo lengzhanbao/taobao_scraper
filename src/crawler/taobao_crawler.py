@@ -31,6 +31,8 @@ from pathlib import Path
 from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
 from src.control.event_store import EventWriter
 from src.utils.segment_evidence import validation_matches
+from src.crawler.retry_state import RetryState, RetryStateError
+from src.crawler.recovery import reconcile_room
 from src.utils.digital_flags import (
     find_values_by_key, parse_json_body,
     summarize_digital_flags, title_keywords_in_values,
@@ -153,6 +155,15 @@ def publish_status(phase, **fields):
                                       if not key.startswith("_")})
         except OSError as error:
             print(f"状态写入失败: {error}", flush=True)
+
+
+retry_state_path = Path(STUDY_ROOT) / "_control" / f"retry_state_instance_{INSTANCE_ID}.json"
+retry_state_error = None
+try:
+    retry_state = RetryState(retry_state_path, RUN_ID, cooldown_seconds=7200, max_failures=3)
+except RetryStateError as error:
+    retry_state = None
+    retry_state_error = error
 
 
 def stop_requested():
@@ -577,6 +588,39 @@ def finalize_room(lid):
 # ========== 主流程 ==========
 log(f"ffmpeg={os.path.exists(FFMPEG)}")
 publish_status("starting")
+if retry_state_error:
+    publish_status("failed", reason="retry_state_corrupt", detail=str(retry_state_error),
+                   instance_id=INSTANCE_ID)
+    _emit_worker_event("retry_state_corrupt", details={"instance_id": INSTANCE_ID})
+    sys.exit(4)
+url_pool = None
+progress_path = os.environ.get("LIVE_PROGRESS_FILE")
+if STATUS_FILE and progress_path:
+    run_control = Path(STATUS_FILE).parent.resolve()
+    expected_progress = (Path(STUDY_ROOT) / "_control" / f"progress_{PORT}.json").resolve()
+    if (not Path(URLS_FILE).resolve().is_relative_to(run_control)
+            or Path(progress_path).resolve() != expected_progress):
+        publish_status("failed", reason="unsafe_reconciliation_paths", instance_id=INSTANCE_ID)
+        _emit_worker_event("unsafe_reconciliation_paths", details={"instance_id": INSTANCE_ID})
+        sys.exit(5)
+    clean_staging()
+    url_pool = read_urls()
+    recovery_report = run_control / f"recovery_instance_{INSTANCE_ID}.jsonl"
+    try:
+        for url, lid, count, total in url_pool:
+            result = reconcile_room(urls_path=URLS_FILE, progress_path=progress_path,
+                                    staging_root=OUTDIR, report_path=recovery_report,
+                                    run_id=RUN_ID, instance_id=INSTANCE_ID, live_id=lid,
+                                    target=total)
+            if result.get("status") in ("reconciled", "already_reconciled"):
+                log(f"启动对账已恢复/确认 room_{lid} 第 {result['segment_index']} 段计数")
+                retry_state.succeeded(lid)
+    except Exception as error:
+        publish_status("failed", reason="startup_reconciliation_failed",
+                       detail=type(error).__name__, instance_id=INSTANCE_ID)
+        _emit_worker_event("startup_reconciliation_failed", details={"instance_id": INSTANCE_ID})
+        sys.exit(5)
+    url_pool = read_urls()
 if DELAY:
     log(f"延迟 {DELAY} 秒启动浏览器")
     interruptible_wait(DELAY)
@@ -676,8 +720,9 @@ page.listen.start("")
 threading.Thread(target=listen_loop, daemon=True).start()
 
 # ---- 主循环：随机抽 + 冷却 ----
-clean_staging()
-url_pool = read_urls()
+if url_pool is None:
+    clean_staging()
+    url_pool = read_urls()
 active = sum(1 for _, _, c, t in url_pool if c < t)
 log(f"共 {len(url_pool)} 个 URL，{active} 个活跃")
 last_record = {}
@@ -757,6 +802,14 @@ while True:
     for url, lid, count, total in url_pool:
         if count >= total:
             continue
+        retry_ok, retry_wait = retry_state.eligible(lid, now)
+        if not retry_ok:
+            entry = retry_state.entry(lid)
+            if entry.get("retry_exhausted"):
+                if lid not in status_data.get("retry_exhausted_rooms", []):
+                    status_data["retry_exhausted_rooms"] = list(status_data.get("retry_exhausted_rooms", [])) + [lid]
+                    _emit_worker_event("retry_exhausted", details={"failure_count": entry.get("failure_count")})
+            continue
         last = last_record.get(lid, 0)
         if now - last < COOLDOWN_SEC:
             continue
@@ -796,11 +849,23 @@ while True:
     # 扫码
     try: ok_scan = scan_room(url, lid)
     except:
-        log("  扫码异常"); last_record[lid] = now; time.sleep(5); continue
+        log("  扫码异常"); last_record[lid] = now
+        entry = retry_state.failed(lid, "scan_exception")
+        if entry["retry_exhausted"]:
+            status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
+                status_data.get("retry_exhausted_rooms", []) + [lid]))
+            _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
+        time.sleep(5); continue
     if not ok_scan:
         log("  不可录"); last_record[lid] = now
+        entry = retry_state.failed(lid, "scan_unavailable_or_filtered")
+        if entry["retry_exhausted"]:
+            status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
+                status_data.get("retry_exhausted_rooms", []) + [lid]))
+            _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
         publish_status("waiting", reason="未取得目标直播流或未通过数字人筛选",
-                       next_retry_t=now + COOLDOWN_SEC)
+                       next_retry_t=entry["last_failure_t"] + retry_state.cooldown_seconds,
+                       retry_exhausted=entry["retry_exhausted"])
         if login_expired():
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
@@ -819,6 +884,11 @@ while True:
     except Exception as e:
         log(f"  录制异常: {e}")
         last_record[lid] = time.time()
+        entry = retry_state.failed(lid, type(e).__name__)
+        if entry["retry_exhausted"]:
+            status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
+                status_data.get("retry_exhausted_rooms", []) + [lid]))
+            _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
         continue
 
     if ok:
@@ -835,6 +905,10 @@ while True:
             batch_ready = len(pending_finalize) >= BATCH_ROOMS
             log(f"  📋 加入归档队列 ({len(pending_finalize)}/{BATCH_ROOMS})")
         last_record[lid] = rec_start_t
+        retry_state.succeeded(lid)
+        status_data["retry_exhausted_rooms"] = [item for item in
+                                                  status_data.get("retry_exhausted_rooms", [])
+                                                  if str(item) != str(lid)]
         url_pool = read_urls()  # 重载
     else:
         log(f"  room_{lid} 录制失败")
@@ -842,5 +916,10 @@ while True:
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
         last_record[lid] = now
+        entry = retry_state.failed(lid, "record_segment_failed")
+        if entry["retry_exhausted"]:
+            status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
+                status_data.get("retry_exhausted_rooms", []) + [lid]))
+            _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
 
 publish_status("stopped" if stop_requested() else "finished", pending_rooms=len(pending_finalize))

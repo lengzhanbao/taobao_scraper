@@ -15,7 +15,7 @@ from src.control.server import Manager
 
 class UrlListsTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(__file__).resolve().parents[1] / '_control' / 'selfchecks' / ('urls_' + uuid.uuid4().hex)
+        self.root = Path(__file__).resolve().parents[1] / '_control' / '_selfchecks' / 'url_lists' / ('urls_' + uuid.uuid4().hex)
         self.root.mkdir(parents=True)
         self.path = self.root / 'urls_1.txt'
 
