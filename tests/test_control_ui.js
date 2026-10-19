@@ -13,9 +13,10 @@ let urlStatsCounts={1:1,2:1};
 let urlRowOverride=null;
 let holdNextUrlStats=false;
 let releaseHeldUrlStats=null;
+let activeElement=null;
 class Element {
   constructor(tag="div") {
-    this.tag=tag;this.children=[];this.dataset={};this.listeners={};this.attributes={};
+    this.tag=tag;this.tagName=tag.toUpperCase();this.isConnected=true;this.disabled=false;this.children=[];this.dataset={};this.listeners={};this.attributes={};
     this.classList={toggle(){}};this.value="";this._text="";
   }
   set id(value) { this._id=value;elements.set(value,this); }
@@ -46,6 +47,7 @@ const requests=[];
 const context=vm.createContext({console,AbortController,URL,
   setTimeout(callback,ms){return setTimeout(callback,(hangState&&ms===10000)||(hangAction&&ms===90000)?5:ms);},clearTimeout,
   setInterval(callback,ms){intervals.push({callback,ms});},window:{confirm:()=>true},document:{
+  get activeElement(){return activeElement;},
   getElementById(id){if(!elements.has(id)){const element=new Element();element.id=id;}return elements.get(id);},
   createElement(tag){return new Element(tag);},addEventListener(){}
 },fetch:async(route,options)=>{
@@ -73,6 +75,18 @@ vm.runInContext(fs.readFileSync(path.join(__dirname,"../src/control/web/app.js")
 for(const id of ["correct-live-id","correct-count","correct-reason","correct-confirmed","correct-submit",
                  "connection-state","last-sync","verified-note"]) context.document.getElementById(id);
 async function main() {
+  const feedbackButton=new Element("button");feedbackButton.textContent="保存操作";feedbackButton.disabled=true;
+  activeElement=feedbackButton;
+  const successFeedback=vm.runInContext('action(async()=>{await Promise.resolve()})',context);
+  assert.equal(feedbackButton.textContent,"处理中…");assert.equal(feedbackButton.disabled,true);
+  await successFeedback;
+  assert.equal(feedbackButton.textContent,"保存操作");assert.equal(feedbackButton.disabled,true);
+  feedbackButton.disabled=false;
+  const failureFeedback=vm.runInContext('action(async()=>{throw new Error("synthetic failure")})',context);
+  assert.equal(feedbackButton.textContent,"处理中…");assert.equal(feedbackButton.disabled,true);
+  await failureFeedback;
+  assert.equal(feedbackButton.textContent,"保存操作");assert.equal(feedbackButton.disabled,false);
+  activeElement=null;
   assert.deepEqual(["accepted","pending","applied","failed","superseded","timed_out"].map(status=>
     vm.runInContext(`timelineStatusName("${status}")`,context)),
     ["已接受","执行中","worker 已确认","失败","被取代","超时未确认"]);

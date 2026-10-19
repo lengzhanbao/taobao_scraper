@@ -19,7 +19,7 @@ let timelineHasMore = false;
 let timelineBusy = false;
 const timelineItems = new Map();
 const $ = id => document.getElementById(id);
-const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
+const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",captcha_required:"等待人工完成验证码",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
 function message(text, error=false) { $("message").hidden=false; $("message").textContent=text; $("message").classList.toggle("error",error); }
 function newOperationId() {
   if(typeof crypto!="undefined"&&crypto.randomUUID)return crypto.randomUUID();
@@ -202,9 +202,14 @@ document.addEventListener("input",settingsInput);
 document.addEventListener("change",settingsInput);
 async function action(fn) {
   if(busy)return;busy=true;$("start").disabled=true;
+  const active=document.activeElement;
+  const activeText=active?.tagName==="BUTTON"?active.textContent:null;
+  const activeDisabled=activeText!==null?active.disabled:null;
+  if(activeText!==null){active.disabled=true;active.textContent="处理中…";}
   const controls=["url-instance","url-text","url-add-text","url-import","url-load","url-save","url-append","url-reload","correct-submit"];
   for(const id of controls)$(id).disabled=true;
   try{await fn();}catch(error){message(error.message,true);}finally{
+    if(activeText!==null&&active.isConnected){active.textContent=activeText;active.disabled=activeDisabled;}
     busy=false;for(const id of controls)$(id).disabled=connectionLost;
     $("url-save").disabled=connectionLost||!urlDocument;$("url-append").disabled=connectionLost||!urlDocument;
     $("correct-submit").disabled=connectionLost||!urlDocument;

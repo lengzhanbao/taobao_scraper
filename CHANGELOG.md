@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- 2.6.1：完整响应写入 staging 扫描 journal 与段 journal，内存预览保留 800000 字符上限并记录截断元数据；最终 JSON 仍内嵌完整 responses。
+- 统一监听与扫描共享状态锁，拒绝 liveId 不匹配的迟到直播详情；验证码改为有限时人工等待，控制台显示等待状态。
+- 控制台操作按钮增加处理中反馈；监听异常增加短退避。
+
 ### Changed
 - 控制台升级到 2.6：记录已捕获标记是否全 true、缺失与检测空窗，不新增数字人样本分类或覆盖阈值。
 - 录制凭据保存 FFprobe 实测时长和 SHA256；归档逐段核验 JSON、视频、弹幕与汇总成套对应。真实空弹幕、未捕获和提取失败分别记录。

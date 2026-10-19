@@ -64,6 +64,16 @@ def stop_recorder(process):
 def product_in(response, live_id):
     if "live.detail.get" not in (response.get("url") or ""):
         return None
+    response_ids = response.get("live_ids") or []
+    if response_ids and str(live_id) not in [str(value) for value in response_ids]:
+        return None
+    for product in response.get("products", []):
+        metadata_live_id = product.get("live_id") if isinstance(product, dict) else None
+        if (isinstance(product, dict) and product.get("itemId")
+                and (str(live_id) in [str(value) for value in response_ids]
+                     or str(metadata_live_id) == str(live_id))):
+            return {"itemId": str(product["itemId"]), "name": str(product.get("name") or ""),
+                    "price": str(product.get("price") or "")}
     body = response.get("body")
     if not isinstance(body, str) or str(live_id) not in body:
         return None
@@ -76,6 +86,21 @@ def product_in(response, live_id):
             "price": price.group(1) if price else ""}
 
 
+def copy_scan_journal(scan_journal_path, target):
+    """Copy complete, valid scan records into active segment journal."""
+    if not scan_journal_path:
+        return False
+    copied = False
+    with Path(scan_journal_path).open(encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            response = json.loads(line)
+            target.write(json.dumps(response, ensure_ascii=False) + "\n")
+            copied = True
+    return copied
+
+
 def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_name,
                    ffmpeg, ffprobe, max_minutes, user_agent, cookie_header,
                    state, lock, page, log, publish_status, run_id=None):
@@ -86,11 +111,25 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
     journal_path = attempt_dir / f"data_{ts}_responses.jsonl"
     with lock:
         initial = list(state["collected"])
+        state.setdefault("journal_error", False)
         journal = journal_path.open("x", encoding="utf-8")
-        for response in initial:
-            journal.write(json.dumps(response, ensure_ascii=False) + "\n")
+        scan_journal_path = state.get("scan_journal_path")
+        if scan_journal_path:
+            try:
+                copy_scan_journal(scan_journal_path, journal)
+            except (OSError, ValueError, TypeError):
+                state["journal_error"] = True
+            state["scan_journal_path"] = None
+        else:
+            for response in initial:
+                journal.write(json.dumps(response, ensure_ascii=False) + "\n")
         journal.flush()
-        state["journal_error"] = False
+        if state["journal_error"]:
+            state["journal"] = None
+            journal.close()
+            log("  扫描响应日志写入失败，本段不启动录制；原始日志保留")
+            publish_status("segment_failed", reason="扫描响应日志写入失败")
+            return False
         state["journal"] = journal
     start_t = time.time()
     process = None
@@ -196,11 +235,13 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                         pass
                     next_refresh = time.monotonic() + 300
                 if time.monotonic() >= next_checkpoint:
+                    with lock:
+                        collected_snapshot = list(state["collected"])
                     atomic_json(attempt_dir / f"data_{ts}.json", {
                         "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
                         "live_url": url, "record_start_t": start_t, "record_end_t": time.time(),
                         "recorded_files": [str(video)], "responses_journal": str(journal_path),
-                        "responses": list(state["collected"]), "product_timeline": timeline,
+                        "responses": collected_snapshot, "product_timeline": timeline,
                     })
                     next_checkpoint = time.monotonic() + 30
                 time.sleep(2)
@@ -261,7 +302,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             with journal_path.open(encoding="utf-8") as stream:
                 failed_responses = [json.loads(line) for line in stream if line.strip()]
         except (OSError, ValueError):
-            failed_responses = list(state["collected"])
+            with lock:
+                failed_responses = list(state["collected"])
         atomic_json(attempt_dir / "attempt_status.json", {
             "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
             "valid": False, "error": str(error), "record_start_t": start_t, "record_end_t": end_t,

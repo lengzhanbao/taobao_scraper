@@ -829,7 +829,8 @@ class Checks(unittest.TestCase):
                              "last_record": {}, "COOLDOWN_SEC": 0, "random": random, "SEG_NAMES": ["第一段"],
                              "scan_room": lambda *args: True, "record_room": record, "mark_recorded": mark,
                              "MAX_MIN": 0, "BATCH_ROOMS": threshold, "OUTDIR": str(folder), "os": os,
-                             "state": {"stream_url": {"url": "synthetic://stream"}}, "read_urls": lambda: rows,
+                             "state": {"stream_url": {"url": "synthetic://stream"}, "scan_journal_path": None},
+                             "capture_lock": threading.Lock(), "read_urls": lambda: rows,
                              "finalize_room": archive, "retry_state": retry_state,
                              "status_data": {}, "_emit_worker_event": lambda *args, **kwargs: None}
                 exec(compile(ast.Module(body=[main_loop], type_ignores=[]), "synthetic_main_loop", "exec"), namespace)

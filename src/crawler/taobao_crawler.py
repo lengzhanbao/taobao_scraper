@@ -211,8 +211,10 @@ def clean_staging():
     if incomplete:
         log(f"发现 {incomplete} 个未完成录制目录，全部保留，不自动清理")
 
-state = {"collected": [], "stream_url": {"url": None}, "sequence": 0, "journal": None}
+state = {"collected": [], "stream_url": {"url": None}, "sequence": 0, "journal": None,
+         "live_id": None, "scan_journal_path": None}
 capture_lock = threading.Lock()
+BODY_PREVIEW_CHARS = 800000
 
 
 # 控制台编码兜底：输出重定向到文件时 Python 会退回 GBK，emoji 日志会崩
@@ -231,39 +233,26 @@ def get_cookie_header():
     except:
         return ""
 
-def solve_slider(page):
-    """auto solve taobao SLIDE captcha: drag handle to right with human-like track"""
+def wait_for_human_captcha(page, timeout=180):
+    """Wait for user to finish captcha; stop request can interrupt wait."""
     try:
-        w = page.ele('#nc_1_wrapper', timeout=1)
-        if not w:
-            return False
-        btn = page.ele('#nc_1_n1z', timeout=2)
-        if not btn:
-            return False
-        log("  [captcha] slider found, drag")
-        page.actions.hold(btn)
-        time.sleep(0.25)
-        steps = 20
-        moved = 0
-        for i in range(1, steps + 1):
-            t = i / steps
-            ease = 1 - (1 - t) ** 3
-            target = int(258 * ease)
-            dx = target - moved
-            dy = random.randint(-1, 1)
-            if dx > 0:
-                page.actions.move(dx, dy, duration=random.uniform(0.02, 0.05))
-                moved = target
-            time.sleep(random.uniform(0.005, 0.02))
-        time.sleep(0.15)
-        page.actions.release()
-        time.sleep(2)
-        w2 = page.ele('#nc_1_wrapper', timeout=2)
-        if w2:
-            log("  [captcha] still there, retry")
-            return False
-        log("  [captcha] passed")
-        return True
+        if not page.ele('#nc_1_wrapper', timeout=1):
+            return True
+        publish_status("captcha_required", reason="请在 Edge 页面手动完成验证码")
+        log("  页面需要人工完成验证码；等待最多 180 秒")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            process_pending_command()
+            if stop_requested():
+                return False
+            if not page.ele('#nc_1_wrapper', timeout=1):
+                publish_status("scanning", reason="")
+                log("  人工验证码已完成，恢复扫描")
+                return True
+            time.sleep(1)
+        publish_status("waiting", reason="人工验证码等待超时")
+        log("  人工验证码等待超时")
+        return False
     except Exception:
         return False
 
@@ -276,7 +265,9 @@ def logged_in():
 def login_expired():
     """扫描最近捕获的响应，判断登录态是否失效（SESSION_EXPIRED 等特征）"""
     try:
-        for c in state["collected"][-80:]:
+        with capture_lock:
+            responses = list(state["collected"][-80:])
+        for c in responses:
             b = c.get("body") or ""
             if isinstance(b, str) and any(k in b for k in ("SESSION_EXPIRED", "登录已失效", "needLogin", "NOT_LOGIN")):
                 return True
@@ -308,49 +299,83 @@ def listen_loop():
         try:
             resp = page.listen.wait(timeout=2)
         except:
+            time.sleep(0.3)
             continue
         if resp is None or resp is False:
             continue
         url = (resp.url or "").lower()
+        if (".ts" in url) or (".m3u8" in url) or not any(
+                k in url for k in ["mtop", "comment", "item", "viewer", "like", "fans", "gmv", "interact", "detail"]):
+            continue
+        if url.endswith(".js") or "data:" in url or "woff" in url or "mtop.js" in url:
+            continue
+        body = None
+        parsed = None
+        try:
+            body = resp.response.body
+            parsed = parse_json_body(body)
+        except Exception:
+            pass
+        response_ids = [str(v) for v in find_values_by_key(parsed, "liveId") if v is not None]
         if "live.detail.get" in url:
-            try:
-                body = resp.response.body
-                parsed = parse_json_body(body)
-                streams = find_values_by_key(parsed, "liveUrl")
-                response_ids = [str(v) for v in find_values_by_key(parsed, "liveId")]
-                if streams and state.get("live_id") in response_ids:
-                    if isinstance(streams[0], str):
-                        state["stream_url"]["url"] = streams[0]
-                        state["stream_url"]["capture_time"] = time.time()
-            except:
-                pass
-        if (".ts" not in url) and (".m3u8" not in url) and any(k in url for k in ["mtop","comment","item","viewer","like","fans","gmv","interact","detail"]):
-            if url.endswith(".js") or "data:" in url or "woff" in url or "mtop.js" in url:
-                continue
-            try:
-                body = resp.response.body
-                if isinstance(body, dict):
-                    snippet = json.dumps(body, ensure_ascii=False)[:800000]
-                elif isinstance(body, str):
-                    snippet = body[:800000]
-                else:
-                    snippet = str(body)[:800000]
-            except:
-                snippet = None
-            # 内存保护：只保留最近 MAX_COLLECTED 条，防止长录制把内存吃满
             with capture_lock:
-                state["sequence"] += 1
-                response = {"t": round(time.time(), 1), "url": url, "body": snippet,
-                            "response_sequence": state["sequence"]}
-                state["collected"].append(response)
-                if state["journal"]:
-                    try:
-                        state["journal"].write(json.dumps(response, ensure_ascii=False) + "\n")
-                        state["journal"].flush()
-                    except OSError:
-                        state["journal_error"] = True
-                if len(state["collected"]) > MAX_COLLECTED:
-                    del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
+                current_live_id = state.get("live_id")
+                # Unattributed responses never set stream URL; stale room IDs are rejected.
+                if response_ids and current_live_id in response_ids:
+                    streams = find_values_by_key(parsed, "liveUrl")
+                    if streams and isinstance(streams[0], str):
+                        state["stream_url"].update(url=streams[0], capture_time=time.time())
+        try:
+            if isinstance(body, dict):
+                full_body = json.dumps(body, ensure_ascii=False)
+            elif isinstance(body, str):
+                full_body = body
+            else:
+                full_body = str(body)
+            snippet = full_body[:BODY_PREVIEW_CHARS]
+        except Exception:
+            full_body = snippet = None
+        with capture_lock:
+            current_live_id = state.get("live_id")
+            if "live.detail.get" in url and response_ids and current_live_id not in response_ids:
+                continue
+            state["sequence"] += 1
+            preview_truncated = bool(full_body is not None and len(full_body) > BODY_PREVIEW_CHARS)
+            response = {"t": round(time.time(), 1), "url": url, "body": snippet,
+                        "response_sequence": state["sequence"], "body_truncated": preview_truncated,
+                        "body_original_chars": len(full_body) if full_body is not None else None,
+                        "live_ids": response_ids,
+                        "digital_flags": find_values_by_key(parsed, "isDigitalAnchorLive"),
+                        "titles": (find_values_by_key(parsed, "liveTitle") or find_values_by_key(parsed, "title")),
+                        "products": []}
+            if ("live.detail.get" in url and current_live_id in response_ids
+                    and isinstance(full_body, str)):
+                item = re.search(r'"itemId"\s*:\s*"?(\d+)"?', full_body)
+                if item:
+                    name = re.search(r'"itemName"\s*:\s*"([^"]+)"', full_body)
+                    price = re.search(r'"itemPrice"\s*:\s*"?([\d.]+)"?', full_body)
+                    response["products"] = [{"itemId": item.group(1),
+                                             "name": name.group(1) if name else "",
+                                             "price": price.group(1) if price else ""}]
+            state["collected"].append(response)
+            complete_response = {**response, "body": full_body, "body_truncated": False,
+                                 "preview_truncated": preview_truncated}
+            spool_path = state.get("scan_journal_path")
+            if spool_path:
+                try:
+                    with open(spool_path, "a", encoding="utf-8") as spool:
+                        spool.write(json.dumps(complete_response, ensure_ascii=False) + "\n")
+                        spool.flush()
+                except OSError:
+                    state["journal_error"] = True
+            if state["journal"]:
+                try:
+                    state["journal"].write(json.dumps(complete_response, ensure_ascii=False) + "\n")
+                    state["journal"].flush()
+                except OSError:
+                    state["journal_error"] = True
+            if len(state["collected"]) > MAX_COLLECTED:
+                del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
 
 def read_urls():
     """读 URL 文件，返回 [(url, lid, 已录次数, 目标次数)]"""
@@ -377,15 +402,25 @@ def read_urls():
     return out
 
 def scan_room(url, live_id):
-    state["live_id"] = str(live_id)
-    state["collected"] = []
-    state["stream_url"]["url"] = None
+    nav_t = time.time()
+    scan_journal = Path(OUTDIR) / f"scan_room_{live_id}_{time.time_ns()}.jsonl"
+    with capture_lock:
+        state["live_id"] = str(live_id)
+        state["collected"] = []
+        state["stream_url"] = {"url": None}
+        state["scan_journal_path"] = str(scan_journal)
+        state["journal_error"] = False
     try:
         page.get(url, timeout=30)
     except:
+        with capture_lock:
+            state["scan_journal_path"] = None
         return False
     time.sleep(3)  # 多等一会页面加载
-    solve_slider(page)
+    if not wait_for_human_captcha(page):
+        with capture_lock:
+            state["scan_journal_path"] = None
+        return False
     clicked = False
     # 策略1: 文字按钮
     for txt in ["进入直播间", "进入直播", "点击进入", "立即观看", "观看直播", "正在直播"]:
@@ -412,42 +447,43 @@ def scan_room(url, live_id):
                     break
             except:
                 pass
-    nav_t = time.time()
-    dl = nav_t + 30  # 多等一会
-    while state["stream_url"]["url"] is None and time.time() < dl:
-        if state["stream_url"]["url"] and state["stream_url"].get("capture_time",0) < nav_t:
-            state["stream_url"]["url"] = None
-        if state["stream_url"]["url"]:
-            valid = False
-            for c in state["collected"]:
-                if "live.detail.get" in (c.get("url") or "") and live_id in (c.get("body") or ""):
-                    valid = True; break
-            if not valid:
-                state["stream_url"]["url"] = None
+    dl = time.time() + 30  # 验证码人工等待不计入流等待时限
+    while time.time() < dl:
+        if stop_requested():
+            with capture_lock:
+                state["scan_journal_path"] = None
+            return False
+        with capture_lock:
+            stream_snapshot = dict(state["stream_url"])
+        if stream_snapshot.get("url") and stream_snapshot.get("capture_time", 0) >= nav_t:
+            break
         time.sleep(1)
-    if not state["stream_url"]["url"]:
+    with capture_lock:
+        stream_snapshot = dict(state["stream_url"])
+        response_snapshot = list(state["collected"])
+    if not stream_snapshot.get("url"):
+        with capture_lock:
+            state["scan_journal_path"] = None
         return False
     # Preserve true/false/missing as separate states. A false segment is not a
     # confirmed digital segment under the study's strict platform-flag rule.
     digital_values = []
     title_values = []
-    for c in state["collected"]:
+    for c in response_snapshot:
         if "live.detail.get" not in (c.get("url") or ""):
             continue
-        parsed = parse_json_body(c.get("body", ""))
-        if parsed is None:
-            continue
-        response_ids = [
-            str(value) for value in find_values_by_key(parsed, "liveId")
-            if value is not None
-        ]
+        response_ids = c.get("live_ids") or []
+        parsed = None
+        if not response_ids:
+            parsed = parse_json_body(c.get("body", ""))
+            if parsed is not None:
+                response_ids = [str(value) for value in find_values_by_key(parsed, "liveId")
+                                if value is not None]
         if str(live_id) not in response_ids:
             continue
-        digital_values.extend(
-            find_values_by_key(parsed, "isDigitalAnchorLive")
-        )
-        response_titles = find_values_by_key(parsed, "liveTitle")
-        if not response_titles:
+        digital_values.extend(c.get("digital_flags", []))
+        response_titles = c.get("titles", [])
+        if not response_titles and parsed is not None:
             response_titles = find_values_by_key(parsed, "title")
         title_values.extend(response_titles)
 
@@ -472,6 +508,8 @@ def scan_room(url, live_id):
             f"  数字人标记：缺失或不完整（平台={flag_summary['raw_label']}），"
             "待核查并跳过"
         )
+    with capture_lock:
+        state["scan_journal_path"] = None
     return False
 
 def record_room(url, live_id, room_dir, surl, seg_name, segment_index):
@@ -849,6 +887,8 @@ while True:
     # 扫码
     try: ok_scan = scan_room(url, lid)
     except:
+        with capture_lock:
+            state["scan_journal_path"] = None
         log("  扫码异常"); last_record[lid] = now
         entry = retry_state.failed(lid, "scan_exception")
         if entry["retry_exhausted"]:
@@ -856,6 +896,10 @@ while True:
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
             _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
         time.sleep(5); continue
+    if stop_requested():
+        with capture_lock:
+            state["scan_journal_path"] = None
+        break
     if not ok_scan:
         log("  不可录"); last_record[lid] = now
         entry = retry_state.failed(lid, "scan_unavailable_or_filtered")
@@ -863,7 +907,7 @@ while True:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
             _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
-        publish_status("waiting", reason="未取得目标直播流或未通过数字人筛选",
+        publish_status("waiting", reason=status_data.get("reason") or "未取得目标直播流或未通过数字人筛选",
                        next_retry_t=entry["last_failure_t"] + retry_state.cooldown_seconds,
                        retry_exhausted=entry["retry_exhausted"])
         if login_expired():
@@ -873,11 +917,16 @@ while True:
 
     # 录制
     if stop_requested():
+        with capture_lock:
+            state["scan_journal_path"] = None
         break
     if pause_requested(PAUSE_FILE):
+        with capture_lock:
+            state["scan_journal_path"] = None
         continue
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
-    surl = state["stream_url"].get("url", "")
+    with capture_lock:
+        surl = state["stream_url"].get("url", "")
     rec_start_t = time.time()
     try:
         ok = record_room(url, lid, room_dir, surl, seg_name, count + 1)

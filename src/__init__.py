@@ -4,7 +4,7 @@ Taobao Live Scraper
 A professional tool for Taobao live streaming data collection and analysis
 """
 
-__version__ = '2.0.0'
+__version__ = '2.6.1'
 __author__ = 'Taobao Live Scraper Contributors'
 __license__ = 'MIT'
 
