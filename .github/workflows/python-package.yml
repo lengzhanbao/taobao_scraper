@@ -16,7 +16,8 @@ jobs:
       PYTHONIOENCODING: utf-8
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Pin Ubuntu to a Python 3.9-compatible image while retaining Python 3.9 CI coverage.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
         python-version: ['3.9', '3.10', '3.11']
 
     steps:
