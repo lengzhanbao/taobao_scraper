@@ -1,5 +1,6 @@
 """Recording attempts retain every source file, including failed attempts."""
 import datetime
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import time
 import uuid
 from src.utils.safe_io import atomic_json, probe_video
 from src.utils.segment_evidence import video_validation, digital_observation
+from src.utils.runtime_options import read_runtime_options
 
 
 _SECRET_QUERY = re.compile(r"(?i)([?&](?:token|access_token|auth[_-]?key|sign|signature|secret|sid|key|session|ticket)=)[^&#\s]+")
@@ -101,6 +103,27 @@ def copy_scan_journal(scan_journal_path, target):
     return copied
 
 
+def _timeline_from_responses(responses, live_id, start_t, end_t):
+    """Rebuild product intervals from complete ordered journal, not bounded preview."""
+    timeline, current, current_start = [], None, 0.0
+    for response in sorted(responses, key=lambda item: item.get("response_sequence", 0)):
+        product = product_in(response, live_id)
+        if not product or (current and product["itemId"] == current["itemId"]):
+            continue
+        event_t = response.get("received_at", response.get("t", start_t))
+        try:
+            event_sec = max(0.0, float(event_t) - start_t)
+        except (TypeError, ValueError):
+            continue
+        if current:
+            timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(event_sec, 1)))
+        current, current_start = product, event_sec
+    if current:
+        timeline.append(dict(current, start_sec=round(current_start, 1),
+                             end_sec=round(max(0.0, end_t - start_t), 1)))
+    return timeline
+
+
 def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_name,
                    ffmpeg, ffprobe, max_minutes, user_agent, cookie_header,
                    state, lock, page, log, publish_status, run_id=None):
@@ -110,27 +133,46 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
     attempt_dir.mkdir(parents=True, exist_ok=False)
     journal_path = attempt_dir / f"data_{ts}_responses.jsonl"
     with lock:
-        initial = list(state["collected"])
-        state.setdefault("journal_error", False)
-        journal = journal_path.open("x", encoding="utf-8")
-        scan_journal_path = state.get("scan_journal_path")
-        if scan_journal_path:
+        sink_lock = state.get("sink_lock")
+        with (sink_lock if sink_lock else nullcontext()):
+            initial = list(state["collected"])
+            state.setdefault("journal_error", False)
+            scan_status = state.get("journal_status")
+            scan_error = bool(scan_status and scan_status.get("error"))
+            journal = None
             try:
-                copy_scan_journal(scan_journal_path, journal)
-            except (OSError, ValueError, TypeError):
+                journal = journal_path.open("x", encoding="utf-8")
+                scan_journal_path = state.get("scan_journal_path")
+                if scan_journal_path:
+                    try:
+                        copy_scan_journal(scan_journal_path, journal)
+                    except (OSError, ValueError, TypeError):
+                        state["journal_error"] = True
+                        if scan_status is not None:
+                            scan_status["error"] = True
+                    state["scan_journal_path"] = None
+                else:
+                    for response in initial:
+                        journal.write(json.dumps(response, ensure_ascii=False) + "\n")
+                journal.flush()
+            except Exception:
                 state["journal_error"] = True
-            state["scan_journal_path"] = None
-        else:
-            for response in initial:
-                journal.write(json.dumps(response, ensure_ascii=False) + "\n")
-        journal.flush()
-        if state["journal_error"]:
-            state["journal"] = None
-            journal.close()
-            log("  扫描响应日志写入失败，本段不启动录制；原始日志保留")
-            publish_status("segment_failed", reason="扫描响应日志写入失败")
-            return False
-        state["journal"] = journal
+                if scan_status is not None:
+                    scan_status["error"] = True
+                if journal is not None:
+                    try:
+                        journal.close()
+                    except Exception:
+                        pass
+                raise
+            if state["journal_error"] or scan_error:
+                state["journal"] = None
+                journal.close()
+                log("  扫描响应日志写入失败，本段不启动录制；原始日志保留")
+                publish_status("segment_failed", reason="扫描响应日志写入失败")
+                return False
+            state["journal"] = journal
+            state["journal_status"] = {"error": False, "navigation_id": state.get("navigation_id")}
     start_t = time.time()
     process = None
     ferr = None
@@ -150,7 +192,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
     if cookie_header:
         headers += f"Cookie: {cookie_header}\r\n"
     try:
-        for attempt in range(1, 4):
+        options = read_runtime_options()
+        for attempt in range(1, options["max_record_attempts"] + 1):
             video = attempt_dir / f"record_{ts}_attempt{attempt}.flv"
             stderr_path = attempt_dir / f"ffmpeg_attempt{attempt}.log"
             cmd = [str(ffmpeg), "-n", "-reconnect", "1", "-reconnect_streamed", "1",
@@ -181,7 +224,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                            ffmpeg_pid=process.pid, recording_id=recording_id, record_start_t=start_t,
                            planned_duration_seconds=max_minutes * 60, elapsed_seconds=0,
                            remaining_seconds=max_minutes * 60)
-            deadline = time.monotonic() + 30
+            deadline = time.monotonic() + options["connect_timeout_seconds"]
             while time.monotonic() < deadline and process.poll() is None:
                 if video.is_file() and video.stat().st_size > 1024:
                     first_data_t = time.time()
@@ -203,8 +246,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             log(f"  {seg_name} 开始录制，时长上限 {max_minutes} 分钟")
             last_size = video.stat().st_size
             last_growth = time.monotonic()
-            next_refresh = time.monotonic() + 300
-            next_checkpoint = time.monotonic() + 30
+            next_refresh = time.monotonic() + options["page_refresh_seconds"]
+            next_checkpoint = time.monotonic() + options["checkpoint_seconds"]
             while process.poll() is None:
                 elapsed = time.time() - start_t
                 publish_status("recording", elapsed_seconds=round(elapsed),
@@ -215,9 +258,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                 size = video.stat().st_size if video.exists() else 0
                 if size > last_size:
                     last_size, last_growth = size, time.monotonic()
-                elif time.monotonic() - last_growth > 60:
+                elif time.monotonic() - last_growth > options["stall_timeout_seconds"]:
                     failure = "stream_stalled"
-                    log("  视频 60 秒未增长，结束本次录制并保留文件")
+                    log(f"  视频 {options['stall_timeout_seconds']} 秒未增长，结束本次录制并保留文件")
                     break
                 with lock:
                     recent = [r for r in state["collected"] if r.get("response_sequence", 0) > last_sequence]
@@ -226,14 +269,16 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                     product = product_in(response, live_id)
                     if product and (current is None or product["itemId"] != current["itemId"]):
                         if current:
-                            timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(elapsed, 1)))
-                        current, current_start = product, elapsed
+                            event_sec = max(0.0, float(response.get("t", time.time())) - start_t)
+                            timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(event_sec, 1)))
+                        current = product
+                        current_start = max(0.0, float(response.get("t", time.time())) - start_t)
                 if time.monotonic() >= next_refresh:
                     try:
                         page.refresh()
                     except Exception:
                         pass
-                    next_refresh = time.monotonic() + 300
+                    next_refresh = time.monotonic() + options["page_refresh_seconds"]
                 if time.monotonic() >= next_checkpoint:
                     with lock:
                         collected_snapshot = list(state["collected"])
@@ -243,8 +288,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                         "recorded_files": [str(video)], "responses_journal": str(journal_path),
                         "responses": collected_snapshot, "product_timeline": timeline,
                     })
-                    next_checkpoint = time.monotonic() + 30
-                time.sleep(2)
+                    next_checkpoint = time.monotonic() + options["checkpoint_seconds"]
+                time.sleep(2)  # status_refresh_seconds is UI-only
             stop_recorder(process)
             ferr.close()
             returncode = process.poll()
@@ -267,11 +312,27 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
         if ferr is not None and not ferr.closed:
             ferr.close()
         with lock:
-            state["journal"] = None
-            journal.flush()
-            os.fsync(journal.fileno())
-            journal.close()
-            journal_error = state["journal_error"]
+            sink_lock = state.get("sink_lock")
+            if sink_lock:
+                sink_lock.acquire()
+            try:
+                state["journal"] = None
+                journal.flush()
+                os.fsync(journal.fileno())
+                journal.close()
+                journal_status = state.get("journal_status")
+                journal_error = bool(state["journal_error"] or
+                                     (journal_status and journal_status.get("error")))
+            except Exception:
+                state["journal_error"] = True
+                journal_error = True
+                try:
+                    journal.close()
+                except Exception:
+                    pass
+            finally:
+                if sink_lock:
+                    sink_lock.release()
     end_t = time.time()
     if current:
         timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(end_t - start_t, 1)))
@@ -283,6 +344,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
         duration = validation["duration_seconds"]
         with journal_path.open(encoding="utf-8") as stream:
             responses = [json.loads(line) for line in stream if line.strip()]
+        timeline = _timeline_from_responses(responses, live_id, start_t, end_t)
         payload = {
             "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
             "live_url": url, "recorded_files": [str(video)],

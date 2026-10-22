@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+from src.utils.runtime_options import RUNTIME_FIELDS, effective_settings
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,8 +33,11 @@ def defaults(study_root=None):
         "edge": default_edge_path(),
         "max_minutes": 20, "cooldown_minutes": 120, "batch_rooms": 6,
         "launch_gap_seconds": 45,
+        **{name: spec["default"] for name, spec in RUNTIME_FIELDS.items()},
         "instances": [{"id": i, "enabled": True, "port": 9222 + i,
-                       "segments": 4 if i == 4 else 3, "urls_file": f"urls_{i}.txt"}
+                       "segments": 4 if i == 4 else 3, "urls_file": f"urls_{i}.txt",
+                       "max_minutes": None, "cooldown_minutes": None,
+                       "room_gap_seconds": None, "page_refresh_seconds": None}
                       for i in range(1, 6)],
     }
 
@@ -52,18 +56,23 @@ def validate(config):
         if not Path(value).is_absolute():
             raise ValueError(key + " 请填写完整路径")
         out[key] = str(Path(value).resolve())
-    for key, low, high in (("max_minutes", 1, 120), ("cooldown_minutes", 1, 1440),
+    for key, low, high in (("max_minutes", 1, 120), ("cooldown_minutes", 0, 1440),
                            ("launch_gap_seconds", 0, 300)):
         value = config[key]
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"{key} 必须是 {low}—{high} 的整数")
+    for key, spec in RUNTIME_FIELDS.items():
+        value = config[key]
+        if type(value) is not int or not spec["min"] <= value <= spec["max"]:
+            raise ValueError(f"{key} 必须是 {spec['min']}—{spec['max']} 的整数")
     if type(config["batch_rooms"]) is not int or config["batch_rooms"] <= 0:
         raise ValueError("batch_rooms 必须是正整数（至少 1 间）")
     if not isinstance(config["instances"], list) or len(config["instances"]) != 5:
         raise ValueError("需要 5 个实例设置")
     rows = []
     for i, row in enumerate(config["instances"], 1):
-        if not isinstance(row, dict) or set(row) != {"id", "enabled", "port", "segments", "urls_file"}:
+        optional = {"max_minutes", "cooldown_minutes", "room_gap_seconds", "page_refresh_seconds"}
+        if not isinstance(row, dict) or set(row) != (set(required["instances"][0]) | optional):
             raise ValueError("实例设置不完整")
         if type(row["id"]) is not int or row["id"] != i or row["port"] != 9222 + i:
             raise ValueError("实例编号和端口不能修改")
@@ -71,6 +80,11 @@ def validate(config):
             raise ValueError("实例开关或 URL 文件名无效")
         if type(row["segments"]) is not int or not 1 <= row["segments"] <= 20:
             raise ValueError("段数必须是 1—20 的整数")
+        for key, low, high in (("max_minutes", 1, 120), ("cooldown_minutes", 0, 1440),
+                               ("room_gap_seconds", 0, 3600), ("page_refresh_seconds", 15, 3600)):
+            value = row[key]
+            if value is not None and (type(value) is not int or not low <= value <= high):
+                raise ValueError(f"实例 {key} 必须为空（继承）或为 {low}—{high} 的整数")
         rows.append(dict(row))
     if not any(row["enabled"] for row in rows):
         raise ValueError("至少启用一个实例")
@@ -133,11 +147,12 @@ def read_url_list(path, target):
 
 def build_environment(config, instance, url_snapshot, status_path, stop_path, run_id, pause_path=None,
                      command_path=None, command_lock=None, event_dir=None, receipt_dir=None):
+    effective = effective_settings(config, instance)
     environment = {
         "LIVE_STUDY_ROOT": config["study_root"], "LIVE_FFMPEG": config["ffmpeg"],
         "LIVE_FFPROBE": config["ffprobe"], "LIVE_EDGE_PATH": config["edge"],
-        "LIVE_MAX_MIN": str(config["max_minutes"]), "LIVE_MAX_ROUND": str(instance["segments"]),
-        "LIVE_MAX_ROUND_OVERRIDE": "1", "LIVE_COOLDOWN_SEC": str(config["cooldown_minutes"] * 60),
+        "LIVE_MAX_MIN": str(effective["max_minutes"]), "LIVE_MAX_ROUND": str(instance["segments"]),
+        "LIVE_MAX_ROUND_OVERRIDE": "1", "LIVE_COOLDOWN_SEC": str(effective["cooldown_minutes"] * 60),
         "LIVE_BATCH_ROOMS": str(config["batch_rooms"]), "LIVE_URLS_FILE": str(url_snapshot),
         "LIVE_STATUS_FILE": str(status_path), "LIVE_STOP_FILE": str(stop_path),
         "LIVE_PAUSE_FILE": str(pause_path) if pause_path else "",
@@ -145,6 +160,8 @@ def build_environment(config, instance, url_snapshot, status_path, stop_path, ru
         "LIVE_RUN_ID": run_id, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(ROOT / "_control" / "pycache"),
     }
+    for name in RUNTIME_FIELDS:
+        environment[RUNTIME_FIELDS[name]["env"]] = str(effective[name])
     if command_path:
         environment["LIVE_COMMAND_FILE"] = str(command_path)
     if command_lock:

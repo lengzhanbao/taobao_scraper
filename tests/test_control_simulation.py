@@ -790,6 +790,9 @@ class Checks(unittest.TestCase):
         folder = self.folder("loop")
         tree = ast.parse((ROOT / "src" / "crawler" / "taobao_crawler.py").read_text(encoding="utf-8"))
         main_loop = next(node for node in tree.body if isinstance(node, ast.While))
+        helper_nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name in {"_finalize_pending_rooms", "finalize_room_once",
+                                          "_wait_for_room_switch", "interruptible_wait"}]
         for pause_during_record, threshold in ((True, 1), (False, 1), (False, 2)):
             with self.subTest(pause=pause_during_record, threshold=threshold):
                 path = folder / f"pause_{pause_during_record}_{threshold}.json"
@@ -829,15 +832,51 @@ class Checks(unittest.TestCase):
                              "last_record": {}, "COOLDOWN_SEC": 0, "random": random, "SEG_NAMES": ["第一段"],
                              "scan_room": lambda *args: True, "record_room": record, "mark_recorded": mark,
                              "MAX_MIN": 0, "BATCH_ROOMS": threshold, "OUTDIR": str(folder), "os": os,
+                             "RUNTIME": {"room_gap_seconds": 0}, "attempted_finalize": set(),
+                             "natural_finished": False,
                              "state": {"stream_url": {"url": "synthetic://stream"}, "scan_journal_path": None},
                              "capture_lock": threading.Lock(), "read_urls": lambda: rows,
                              "finalize_room": archive, "retry_state": retry_state,
                              "status_data": {}, "_emit_worker_event": lambda *args, **kwargs: None}
+                exec(compile(ast.Module(body=helper_nodes, type_ignores=[]),
+                             "synthetic_finalize_helpers", "exec"), namespace)
                 exec(compile(ast.Module(body=[main_loop], type_ignores=[]), "synthetic_main_loop", "exec"), namespace)
                 self.assertEqual(events.count("record_finished"), 1)
                 self.assertIn("marked", events)
                 self.assertEqual("archived" in events, threshold == 1 and not pause_during_record)
                 self.assertEqual("paused" in events, pause_during_record)
+
+    def test_room_gap_after_failed_scan_and_same_room(self):
+        source = (ROOT / "src" / "crawler" / "taobao_crawler.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "_wait_for_room_switch")
+        namespace = {}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "synthetic_room_gap", "exec"), namespace)
+        waits = []
+        wait = lambda seconds: waits.append(seconds)
+        previous = namespace["_wait_for_room_switch"]("A", None, 45, wait)
+        scan_succeeded = False
+        self.assertFalse(scan_succeeded)
+        previous = namespace["_wait_for_room_switch"]("B", previous, 45, wait)
+        self.assertEqual(waits, [45])
+        previous = namespace["_wait_for_room_switch"]("C", previous, 0, wait)
+        self.assertEqual(waits, [45])
+        previous = namespace["_wait_for_room_switch"]("C", previous, 45, wait)
+        self.assertEqual(waits, [45])
+
+        main_loop = next(node for node in tree.body if isinstance(node, ast.While))
+        scan_line = next(node.lineno for node in ast.walk(main_loop)
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "scan_room")
+        remember_line = next(node.lineno for node in ast.walk(main_loop)
+                             if isinstance(node, ast.Assign)
+                             and isinstance(node.targets[0], ast.Subscript)
+                             and isinstance(node.targets[0].value, ast.Name)
+                             and node.targets[0].value.id == "status_data"
+                             and isinstance(node.targets[0].slice, ast.Constant)
+                             and node.targets[0].slice.value == "previous_room_id")
+        self.assertLess(remember_line, scan_line)
 
     def test_13_progress_caps_and_runtime_threshold(self):
         from src.control.server import summarize_rows

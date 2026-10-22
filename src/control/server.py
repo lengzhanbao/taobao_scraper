@@ -1,6 +1,7 @@
 """Loopback-only, standard-library dashboard. Crawlers start only on explicit clicks."""
 import argparse
 import ctypes
+import copy
 from datetime import datetime
 import importlib.util
 import json
@@ -20,6 +21,7 @@ import uuid
 import webbrowser
 
 from src.control.settings import ROOT, defaults, validate, migrate_settings, read_url_list, build_environment
+from src.utils.runtime_options import RUNTIME_FIELDS, effective_settings
 from src.utils.safe_io import atomic_json, digest
 from src.utils.segment_evidence import (EvidenceCache, validation_matches, digital_observation,
                                        observation_counts, inspect_archive)
@@ -30,7 +32,7 @@ from src.control.event_store import EventWriter, read_event_page, utc_now
 from src.control.operation_store import OperationStore
 
 CONTROL = ROOT / "_control"
-VERSION = "2.6.1-local-panel"
+VERSION = "2.7.0-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 OPERATION_STATUSES = {"accepted", "pending", "applied", "failed", "superseded", "timed_out"}
 
@@ -74,7 +76,7 @@ def summarize_rows(rows):
                               "partial" if unknown else "verified"}
 
 
-def verified_progress_records(progress, study_root, observations=None, cache=None):
+def verified_progress_records(progress, study_root, observations=None, cache=None, parsed_cache=None):
     """Return receipt identities, historical counts and per-room receipt state."""
     if not isinstance(progress, dict):
         return {}, {}, {}
@@ -84,6 +86,7 @@ def verified_progress_records(progress, study_root, observations=None, cache=Non
         return {}, legacy, {}
     staging = (Path(study_root) / "_staging").resolve()
     cache = cache or EvidenceCache()
+    parsed_cache = parsed_cache if parsed_cache is not None else {}
     verified = {}
     receipt_states = {}
     raw_legacy = progress.get("legacy_counts", {})
@@ -112,16 +115,41 @@ def verified_progress_records(progress, study_root, observations=None, cache=Non
                         (video_stat.st_size, video_stat.st_mtime_ns) !=
                         (receipt["video_size"], receipt["video_mtime_ns"])):
                     continue
-                with final_path.open(encoding="utf-8") as stream:
-                    final = json.load(stream)
-                if (not isinstance(final, dict)
-                        or not isinstance(final.get("recorded_files"), list)):
+                signature = (final_stat.st_size, final_stat.st_mtime_ns,
+                             final_stat.st_ctime_ns, getattr(final_stat, "st_ino", 0))
+                final_hash = cache.get(final_path, "sha256", digest)
+                after_hash_stat = final_path.stat()
+                if signature != (after_hash_stat.st_size, after_hash_stat.st_mtime_ns,
+                                 after_hash_stat.st_ctime_ns, getattr(after_hash_stat, "st_ino", 0)):
+                    continue
+                parse_key = (str(final_path), str(live_id))
+                cached = parsed_cache.get(parse_key)
+                if cached and cached[0] == signature and cached[1] == final_hash:
+                    summary = copy.deepcopy(cached[2])
+                else:
+                    with final_path.open(encoding="utf-8") as stream:
+                        final = json.load(stream)
+                    after_read_stat = final_path.stat()
+                    if signature != (after_read_stat.st_size, after_read_stat.st_mtime_ns,
+                                     after_read_stat.st_ctime_ns, getattr(after_read_stat, "st_ino", 0)):
+                        continue
+                    if not isinstance(final, dict) or not isinstance(final.get("recorded_files"), list):
+                        continue
+                    summary = {key: final.get(key) for key in (
+                        "recorded_files", "technical_validation", "video_duration_seconds",
+                        "max_minutes", "recording_id", "segment_index", "record_start_t", "record_end_t")}
+                    summary["digital_observation"] = digital_observation(final, live_id)
+                    if len(parsed_cache) >= 2048:
+                        parsed_cache.clear()
+                    parsed_cache[parse_key] = (signature, final_hash, copy.deepcopy(summary))
+                final = summary
+                if not isinstance(final.get("recorded_files"), list):
                     continue
                 if receipt.get("validation_schema_version") != 1 or not final.get("technical_validation"):
                     receipt_states[live_id] = "unverified"
                     continue
                 if (not validation_matches(final)
-                        or cache.get(final_path, "sha256", digest) != receipt.get("final_sha256")
+                        or final_hash != receipt.get("final_sha256")
                         or cache.get(video_path, "sha256", digest) != receipt.get("video_sha256")
                         or receipt.get("video_sha256") != final["technical_validation"]["video_sha256"]):
                     continue
@@ -132,7 +160,7 @@ def verified_progress_records(progress, study_root, observations=None, cache=Non
                     continue
                 identities.add(str(receipt["recording_id"]))
                 if observations is not None:
-                    observations.setdefault(live_id, {})[str(receipt["recording_id"])] = digital_observation(final, live_id)
+                    observations.setdefault(live_id, {})[str(receipt["recording_id"])] = copy.deepcopy(final["digital_observation"])
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
         if receipts:
@@ -315,6 +343,7 @@ class Manager:
         self.check_cache = None
         self._archive_cache = ("", 0, {})
         self.evidence_cache = EvidenceCache()
+        self._progress_parse_cache = {}
         self._event_writers = {}
         self._event_writers_lock = threading.Lock()
 
@@ -372,7 +401,9 @@ class Manager:
                 raise ValueError('当前实例清单中找不到这个直播 ID')
             progress = load_json(Path(self.settings['study_root']) / '_control' /
                                  f"progress_{self.settings['instances'][instance_id - 1]['port']}.json", {})
-            receipt_records, _, _ = verified_progress_records(progress, self.settings['study_root'])
+            receipt_records, _, _ = verified_progress_records(progress, self.settings['study_root'],
+                                                               cache=self.evidence_cache,
+                                                               parsed_cache=self._progress_parse_cache)
             archive_ids = archived_segment_records(self.settings['study_root'], self.settings['ffprobe'],
                                                   cache=self.evidence_cache).get(live_id, set())
             evidence_floor = len(receipt_records.get(live_id, set()) | archive_ids)
@@ -423,7 +454,8 @@ class Manager:
                              f"progress_{instance['port']}.json", {})
         observations = {}
         valid_records, legacy_counts, receipt_states = verified_progress_records(
-            progress, config["study_root"], observations, self.evidence_cache)
+            progress, config["study_root"], observations, self.evidence_cache,
+            self._progress_parse_cache)
         archive_bundle = self.archive_bundle(config["study_root"], config["ffprobe"])
         archive_records = archive_bundle["records"]
         corrections = read_count_corrections(config["study_root"]) if snapshot is None else {}
@@ -502,7 +534,13 @@ class Manager:
             pause_state = pause_requested(job.get("pause_file"))
             if pending_pause:
                 pause_state = bool(last.get("desired_state"))
-            jobs.append(dict(job, status=status, phase=phase, alive=alive,
+            run_settings = self.run.get("settings") or self.settings
+            run_instance = next((row for row in run_settings.get("instances", [])
+                                 if row.get("id") == job.get("instance_id")), {})
+            actual_settings = (effective_settings(run_settings, run_instance)
+                               if all(key in run_settings for key in RUNTIME_FIELDS) else None)
+            jobs.append(dict(job, actual_settings=actual_settings,
+                             status=status, phase=phase, alive=alive,
                              pause_supported=bool(job.get("pause_file")),
                              pause_requested=pause_state,
                              stop_requested=Path(job["stop_file"]).is_file(),
@@ -576,7 +614,7 @@ class Manager:
             result = self.preflight()
             if not result["ok"]:
                 raise ValueError("启动条件未满足，请查看环境检查结果")
-            config = self.settings
+            config = json.loads(json.dumps(self.settings))
             run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
             run_dir = self.control / "runs" / run_id
             run_dir.mkdir(parents=True, exist_ok=False)
@@ -672,9 +710,15 @@ class Manager:
         config = run.get("settings") or self.settings
         return OperationStore(config["study_root"])
 
-    def _operation_timeout(self, operation, run=None):
+    def _operation_timeout(self, operation, run=None, instance_id=None):
         config = (run or self.run).get("settings") or self.settings
-        max_minutes = int(config.get("max_minutes", 20))
+        instance = next((row for row in config.get("instances", [])
+                         if row.get("id") == instance_id), None)
+        if instance is not None:
+            max_minutes = int(effective_settings(config, instance).get("max_minutes", 20))
+        else:
+            max_minutes = max((int(effective_settings(config, row).get("max_minutes", 20))
+                               for row in config.get("instances", [])), default=int(config.get("max_minutes", 20)))
         if operation == "resume":
             return 30
         return max(120, max_minutes * 60 + 120)
@@ -803,7 +847,8 @@ class Manager:
                                      operation_id=request["operation_id"], details={"error": failed.get("detail")})
                 continue
             age = now - _parse_utc_epoch(request.get("created_at"))
-            if age > self._operation_timeout(request.get("operation"), self.run):
+            if age > self._operation_timeout(request.get("operation"), self.run,
+                                             request.get("instance_id")):
                 timed_out = store.update_request(request["instance_id"], request["operation_id"], "timed_out",
                                                  detail="尚未收到 worker 确认；命令仍有效，不自动重发")
                 if timed_out:
@@ -959,8 +1004,10 @@ class Manager:
             controller_gap = any(writer.telemetry_gap for (writer_run, _), writer in self._event_writers.items()
                                  if writer_run == run_id)
             worker_gap = any(job.get("status", {}).get("telemetry_gap") for job in jobs)
-            return {"settings": self.settings, "instances": instances, "totals": totals,
+            return {"settings": self.settings, "default_settings": defaults(), "runtime_fields": RUNTIME_FIELDS,
+                    "instances": instances, "totals": totals,
                     "jobs": jobs, "preflight": self.check_cache,
+                    "run_settings": self.run.get("settings") if self.run.get("run_id") else None,
                     "telemetry_gap": bool(controller_gap or worker_gap),
                     "version": VERSION, "code_root": str(ROOT),
                     "server_pid": os.getpid(),
@@ -1040,6 +1087,7 @@ def handler_for(manager, token, expected_origin):
                     raise ValueError("请求大小无效")
                 body = json.loads(self.rfile.read(length))
                 actions = {"/api/settings": lambda: manager.save(body),
+                           "/api/settings/validate": lambda: migrate_settings(body, defaults()),
                            "/api/check": manager.preflight, "/api/start": manager.start,
                            "/api/stop": lambda: manager.stop(body.get("operation_id"))}
                 actions["/api/pause"] = lambda: manager.set_paused(body.get("instance_id"), True,

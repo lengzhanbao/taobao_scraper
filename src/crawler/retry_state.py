@@ -34,13 +34,12 @@ class RetryState:
             for live_id, entry in raw["rooms"].items():
                 if (not isinstance(live_id, str) or not isinstance(entry, dict)
                         or type(entry.get("failure_count")) is not int
-                        or not 0 <= entry["failure_count"] <= self.max_failures
+                        # Stored count may come from a prior run with another configured limit.
+                        or not 0 <= entry["failure_count"] <= 1000000
                         or not isinstance(entry.get("last_failure_t"), (int, float))
                         or not math.isfinite(entry["last_failure_t"])
                         or type(entry.get("retry_exhausted")) is not bool):
                     raise ValueError("room entry")
-                if entry["retry_exhausted"] != (entry["failure_count"] >= self.max_failures):
-                    raise ValueError("retry exhaustion mismatch")
                 cooldown_until = entry.get("cooldown_until")
                 if cooldown_until is None:
                     # Migrate older state without losing its outstanding cooldown.
@@ -76,7 +75,7 @@ class RetryState:
         entry = self.data["rooms"].get(str(live_id))
         if not entry:
             return True, 0
-        if entry["retry_exhausted"] or entry["failure_count"] >= self.max_failures:
+        if entry["failure_count"] >= self.max_failures:
             return False, None
         now = self.clock() if now is None else now
         remaining = float(entry.get("cooldown_until", float(entry["last_failure_t"]) +

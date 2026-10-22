@@ -31,6 +31,8 @@ from pathlib import Path
 from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
 from src.control.event_store import EventWriter
 from src.utils.segment_evidence import validation_matches
+from src.utils.runtime_options import read_runtime_options
+from src.crawler.response_attribution import attribution_status, detail_live_urls
 from src.crawler.retry_state import RetryState, RetryStateError
 from src.crawler.recovery import reconcile_room
 from src.utils.digital_flags import (
@@ -64,7 +66,11 @@ try:
 except OSError:
     EVENTS = None
 telemetry_gap = bool(EVENT_DIR) and (EVENTS is None or EVENTS.telemetry_gap)
-status_data = {"pid": os.getpid(), "port": PORT, "run_id": RUN_ID}
+RUNTIME = read_runtime_options()
+status_data = {"pid": os.getpid(), "port": PORT, "run_id": RUN_ID,
+               "latest_response_t": None, "last_response_sequence": 0,
+               "unattributed_response_count": 0, "journal_error": False,
+               "last_persisted_sequence": 0, "last_persisted_t": None}
 processed_state_path = (Path(STATUS_FILE).parent / f"worker_state_{INSTANCE_ID}.json"
                         if STATUS_FILE else None)
 try:
@@ -160,7 +166,9 @@ def publish_status(phase, **fields):
 retry_state_path = Path(STUDY_ROOT) / "_control" / f"retry_state_instance_{INSTANCE_ID}.json"
 retry_state_error = None
 try:
-    retry_state = RetryState(retry_state_path, RUN_ID, cooldown_seconds=7200, max_failures=3)
+    retry_state = RetryState(retry_state_path, RUN_ID,
+                             cooldown_seconds=RUNTIME["failure_cooldown_minutes"] * 60,
+                             max_failures=RUNTIME["max_room_failures"])
 except RetryStateError as error:
     retry_state = None
     retry_state_error = error
@@ -212,8 +220,11 @@ def clean_staging():
         log(f"发现 {incomplete} 个未完成录制目录，全部保留，不自动清理")
 
 state = {"collected": [], "stream_url": {"url": None}, "sequence": 0, "journal": None,
-         "live_id": None, "scan_journal_path": None}
+         "live_id": None, "navigation_id": None, "scan_journal_path": None,
+         "journal_status": {"error": False, "navigation_id": None}}
 capture_lock = threading.Lock()
+sink_lock = threading.Lock()
+state["sink_lock"] = sink_lock
 BODY_PREVIEW_CHARS = 800000
 
 
@@ -297,12 +308,13 @@ def refresh_login():
 def listen_loop():
     while True:
         try:
-            resp = page.listen.wait(timeout=2)
+            resp = page.listen.wait(timeout=RUNTIME["listen_timeout_seconds"])
         except:
             time.sleep(0.3)
             continue
         if resp is None or resp is False:
             continue
+        received_at = time.time()
         url = (resp.url or "").lower()
         if (".ts" in url) or (".m3u8" in url) or not any(
                 k in url for k in ["mtop", "comment", "item", "viewer", "like", "fans", "gmv", "interact", "detail"]):
@@ -317,14 +329,6 @@ def listen_loop():
         except Exception:
             pass
         response_ids = [str(v) for v in find_values_by_key(parsed, "liveId") if v is not None]
-        if "live.detail.get" in url:
-            with capture_lock:
-                current_live_id = state.get("live_id")
-                # Unattributed responses never set stream URL; stale room IDs are rejected.
-                if response_ids and current_live_id in response_ids:
-                    streams = find_values_by_key(parsed, "liveUrl")
-                    if streams and isinstance(streams[0], str):
-                        state["stream_url"].update(url=streams[0], capture_time=time.time())
         try:
             if isinstance(body, dict):
                 full_body = json.dumps(body, ensure_ascii=False)
@@ -336,20 +340,27 @@ def listen_loop():
         except Exception:
             full_body = snippet = None
         with capture_lock:
-            current_live_id = state.get("live_id")
-            if "live.detail.get" in url and response_ids and current_live_id not in response_ids:
+            if state.get("capture_closed"):
                 continue
+            current_live_id = state.get("live_id")
+            navigation_id = state.get("navigation_id")
+            status = attribution_status(response_ids, current_live_id, navigation_id)
             state["sequence"] += 1
             preview_truncated = bool(full_body is not None and len(full_body) > BODY_PREVIEW_CHARS)
-            response = {"t": round(time.time(), 1), "url": url, "body": snippet,
+            response = {"t": round(received_at, 1), "received_at": received_at, "url": url, "body": snippet,
                         "response_sequence": state["sequence"], "body_truncated": preview_truncated,
                         "body_original_chars": len(full_body) if full_body is not None else None,
                         "live_ids": response_ids,
+                        "navigation_id": navigation_id,
+                        "observed_live_id": response_ids[0] if len(set(response_ids)) == 1 else None,
+                        "attribution_status": status,
+                        "attribution_basis": ("response_live_id_match" if status == "matched"
+                                              else "receive_navigation_context_only" if navigation_id
+                                              else "no_live_id_evidence"),
                         "digital_flags": find_values_by_key(parsed, "isDigitalAnchorLive"),
                         "titles": (find_values_by_key(parsed, "liveTitle") or find_values_by_key(parsed, "title")),
                         "products": []}
-            if ("live.detail.get" in url and current_live_id in response_ids
-                    and isinstance(full_body, str)):
+            if ("live.detail.get" in url and status == "matched" and isinstance(full_body, str)):
                 item = re.search(r'"itemId"\s*:\s*"?(\d+)"?', full_body)
                 if item:
                     name = re.search(r'"itemName"\s*:\s*"([^"]+)"', full_body)
@@ -361,22 +372,44 @@ def listen_loop():
             complete_response = {**response, "body": full_body, "body_truncated": False,
                                  "preview_truncated": preview_truncated}
             spool_path = state.get("scan_journal_path")
+            sink_status = state.get("journal_status")
+            status_data["latest_response_t"] = response["t"]
+            status_data["last_response_sequence"] = response["response_sequence"]
+            if response["attribution_status"] != "matched":
+                status_data["unattributed_response_count"] = int(
+                    status_data.get("unattributed_response_count", 0)) + 1
+            if len(state["collected"]) > RUNTIME["max_collected"]:
+                del state["collected"][:len(state["collected"]) - RUNTIME["max_collected"]]
+            # Keep ambiguous and late responses in the journal; only exact object-paired URL can start stream.
+            if "live.detail.get" in url and status == "matched":
+                pairs = detail_live_urls(parsed)
+                matching_urls = {item_url for item_id, item_url in pairs
+                                 if item_id == str(current_live_id)}
+                if len(matching_urls) == 1:
+                    state["stream_url"].update(url=next(iter(matching_urls)), capture_time=received_at)
+            journal_ref = state.get("journal")
+            sink_lock.acquire()
+        try:
+            encoded = json.dumps(complete_response, ensure_ascii=False) + "\n"
+            persisted = False
             if spool_path:
-                try:
-                    with open(spool_path, "a", encoding="utf-8") as spool:
-                        spool.write(json.dumps(complete_response, ensure_ascii=False) + "\n")
-                        spool.flush()
-                except OSError:
-                    state["journal_error"] = True
-            if state["journal"]:
-                try:
-                    state["journal"].write(json.dumps(complete_response, ensure_ascii=False) + "\n")
-                    state["journal"].flush()
-                except OSError:
-                    state["journal_error"] = True
-            if len(state["collected"]) > MAX_COLLECTED:
-                del state["collected"][:len(state["collected"]) - MAX_COLLECTED]
-
+                with open(spool_path, "a", encoding="utf-8") as spool:
+                    spool.write(encoded)
+                    spool.flush()
+                persisted = True
+            if journal_ref:
+                journal_ref.write(encoded)
+                journal_ref.flush()
+                persisted = True
+            if persisted:
+                status_data["last_persisted_sequence"] = response["response_sequence"]
+                status_data["last_persisted_t"] = received_at
+        except Exception:
+            if sink_status is not None:
+                sink_status["error"] = True
+            status_data["journal_error"] = True
+        finally:
+            sink_lock.release()
 def read_urls():
     """读 URL 文件，返回 [(url, lid, 已录次数, 目标次数)]"""
     if not os.path.exists(URLS_FILE):
@@ -401,23 +434,54 @@ def read_urls():
         out.append((clean, lid, count, total))
     return out
 
+
+def _finalize_pending_rooms(room_ids, finalize, stop_check):
+    """Try unique rooms once; preserve failed and not-yet-started IDs."""
+    unique_ids = list(dict.fromkeys(room_ids))
+    pending = []
+    for index, live_id in enumerate(unique_ids):
+        if stop_check():
+            pending.extend(unique_ids[index:])
+            break
+        if not finalize(live_id):
+            pending.append(live_id)
+    return pending
+
+
+def _wait_for_room_switch(live_id, previous_live_id, gap_seconds, wait_fn):
+    """Wait after a different room, then return room ID to remember before scanning."""
+    if previous_live_id is not None and str(previous_live_id) != str(live_id) and gap_seconds:
+        wait_fn(gap_seconds)
+    return str(live_id)
+
+
 def scan_room(url, live_id):
     nav_t = time.time()
+    navigation_id = f"{RUN_ID}:{live_id}:{time.time_ns()}"
     scan_journal = Path(OUTDIR) / f"scan_room_{live_id}_{time.time_ns()}.jsonl"
     with capture_lock:
+        sink_lock.acquire()
         state["live_id"] = str(live_id)
+        state["navigation_id"] = navigation_id
         state["collected"] = []
         state["stream_url"] = {"url": None}
         state["scan_journal_path"] = str(scan_journal)
         state["journal_error"] = False
+        state["journal_status"] = {"error": False, "navigation_id": navigation_id}
+        status_data["journal_error"] = False
+        sink_lock.release()
     try:
-        page.get(url, timeout=30)
-    except:
+        page.get(url, timeout=RUNTIME["scan_timeout_seconds"])
+    except Exception as error:
+        status_data["last_scan_result"] = "network_or_navigation_error"
+        status_data["last_scan_reason"] = type(error).__name__
         with capture_lock:
             state["scan_journal_path"] = None
         return False
-    time.sleep(3)  # 多等一会页面加载
-    if not wait_for_human_captcha(page):
+    time.sleep(min(3, RUNTIME["scan_timeout_seconds"]))  # 页面加载缓冲
+    if not wait_for_human_captcha(page, timeout=RUNTIME["captcha_timeout_seconds"]):
+        status_data["last_scan_result"] = "captcha_timeout_or_stop"
+        status_data["last_scan_reason"] = "captcha_timeout_or_stop"
         with capture_lock:
             state["scan_journal_path"] = None
         return False
@@ -447,7 +511,7 @@ def scan_room(url, live_id):
                     break
             except:
                 pass
-    dl = time.time() + 30  # 验证码人工等待不计入流等待时限
+    dl = time.time() + RUNTIME["connect_timeout_seconds"]  # 验证码人工等待不计入流等待时限
     while time.time() < dl:
         if stop_requested():
             with capture_lock:
@@ -457,11 +521,20 @@ def scan_room(url, live_id):
             stream_snapshot = dict(state["stream_url"])
         if stream_snapshot.get("url") and stream_snapshot.get("capture_time", 0) >= nav_t:
             break
-        time.sleep(1)
+        time.sleep(min(1, RUNTIME["listen_timeout_seconds"]))
     with capture_lock:
         stream_snapshot = dict(state["stream_url"])
         response_snapshot = list(state["collected"])
     if not stream_snapshot.get("url"):
+        has_conflict = any(item.get("attribution_status") == "conflict"
+                           for item in response_snapshot)
+        write_failed = bool(state.get("journal_status", {}).get("error"))
+        status_data["last_scan_result"] = ("journal_write_error" if write_failed else
+                                            "ambiguous_live_detail_response" if has_conflict
+                                            else "missing_stream_or_unattributed_response")
+        status_data["last_scan_reason"] = ("journal persistence failed; raw evidence retained" if write_failed else
+                                            "multiple_or_conflicting_live_ids; retained in journal"
+                                            if has_conflict else "missing_stream_or_unattributed_response")
         with capture_lock:
             state["scan_journal_path"] = None
         return False
@@ -479,7 +552,7 @@ def scan_room(url, live_id):
             if parsed is not None:
                 response_ids = [str(value) for value in find_values_by_key(parsed, "liveId")
                                 if value is not None]
-        if str(live_id) not in response_ids:
+        if c.get("attribution_status") != "matched" or str(live_id) not in response_ids:
             continue
         digital_values.extend(c.get("digital_flags", []))
         response_titles = c.get("titles", [])
@@ -490,20 +563,28 @@ def scan_room(url, live_id):
     flag_summary = summarize_digital_flags(digital_values)
     title_matches = title_keywords_in_values(title_values)
     if title_matches:
+        status_data["last_scan_result"] = "success_title_rule"
+        status_data["last_scan_reason"] = "title_keyword_match"
         log(
             f"  数字人标记：标题命中={'、'.join(title_matches)}；"
             f"平台={flag_summary['raw_label']}（按标题规则保留）"
         )
         return True
     if flag_summary["all_true"]:
+        status_data["last_scan_result"] = "success_platform_flag"
+        status_data["last_scan_reason"] = "all_captured_flags_true"
         log("  数字人标记：该次响应全 true（按平台标记保留）")
         return True
     if flag_summary["has_false"]:
+        status_data["last_scan_result"] = "non_digital"
+        status_data["last_scan_reason"] = "platform_flag_false"
         log(
             f"  数字人标记：含 false（平台={flag_summary['raw_label']}），"
             "按数字人样本口径跳过"
         )
     else:
+        status_data["last_scan_result"] = "missing_digital_flag"
+        status_data["last_scan_reason"] = "digital_flag_missing_or_incomplete"
         log(
             f"  数字人标记：缺失或不完整（平台={flag_summary['raw_label']}），"
             "待核查并跳过"
@@ -782,6 +863,17 @@ for url, lid, count, total in url_pool:
             last_record[lid] = latest_t
 log(f"恢复 {len(last_record)} 个房间的录制时间")
 pending_finalize = []  # 批量归档队列
+attempted_finalize = set()
+
+
+def finalize_room_once(live_id):
+    key = str(live_id)
+    if key in attempted_finalize:
+        return False
+    attempted_finalize.add(key)
+    return finalize_room(live_id)
+
+
 suspect_finalize = []  # staging 有未归档段但 session 已存在 → 仅告警，不自动 parse（防重编号损坏）
 # 启动时检查已有满段房间（跳过 session 已完整归档的）
 sess_root = os.path.join(STUDY_ROOT, "sessions")
@@ -811,13 +903,14 @@ for url, lid, count, total in url_pool:
         suspect_finalize.append(lid)   # 有额外未归档段 → 人工确认
 if pending_finalize:
     log(f"📋 启动发现 {len(pending_finalize)} 间已满段，待归档（已跳过 session 已归档房间）")
-    if len(pending_finalize) >= BATCH_ROOMS:
+    if len(pending_finalize) >= BATCH_ROOMS and not stop_requested():
         log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
-        pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
+        pending_finalize = _finalize_pending_rooms(pending_finalize, finalize_room_once, stop_requested)
 if suspect_finalize:
     log(f"⚠️ {len(suspect_finalize)} 间 staging 有未归档段且 session 已存在（不自动 parse，需人工确认）: {suspect_finalize}")
 
 batch_ready = False
+natural_finished = False
 while True:
     if not wait_while_paused(PAUSE_FILE, stop_requested=stop_requested,
                              publish_status=publish_status, log=log,
@@ -827,9 +920,9 @@ while True:
     if stop_requested():
         log("收到停止请求，当前段已完成，原数据保留")
         break
-    if batch_ready and len(pending_finalize) >= BATCH_ROOMS:
+    if batch_ready and len(pending_finalize) >= BATCH_ROOMS and not stop_requested():
         log(f"\n📦 批量归档 {len(pending_finalize)} 间...")
-        pending_finalize = [flid for flid in pending_finalize if not finalize_room(flid)]
+        pending_finalize = _finalize_pending_rooms(pending_finalize, finalize_room_once, stop_requested)
         log(f"   批量归档结束，{len(pending_finalize)} 间未通过校验留在队列\n")
         publish_status("waiting", pending_rooms=len(pending_finalize))
         batch_ready = False
@@ -873,16 +966,25 @@ while True:
             remaining = sum(1 for _, _, c, t in url_pool if c < t)
             if remaining == 0:
                 log("🎉 本实例所有房间已录满")
+                natural_finished = True
                 break
         interruptible_wait(wait)
         continue
 
     url, lid, count, total = random.choice(candidates)
+    previous_lid = status_data.get("previous_room_id")
+    room_switch = previous_lid is not None and str(previous_lid) != str(lid)
+    if room_switch and RUNTIME["room_gap_seconds"]:
+        log(f"  房间切换间隔 {RUNTIME['room_gap_seconds']} 秒")
+    previous_lid = _wait_for_room_switch(lid, previous_lid, RUNTIME["room_gap_seconds"], interruptible_wait)
+    if stop_requested():
+        break
+    status_data["previous_room_id"] = previous_lid
     seg_name = SEG_NAMES[count] if count < len(SEG_NAMES) else f"第{count+1}段"
     log(f"\n🎯 {seg_name} room_{lid}")
     publish_status("scanning", live_id=lid, segment_index=count + 1,
                    planned_duration_seconds=MAX_MIN * 60, elapsed_seconds=0,
-                   remaining_seconds=MAX_MIN * 60, reason="")
+                   remaining_seconds=MAX_MIN * 60, reason="", last_scan_result="in_progress")
 
     # 扫码
     try: ok_scan = scan_room(url, lid)
@@ -950,10 +1052,12 @@ while True:
             interruptible_wait(pad)
         log(f"📀 room_{lid} {new_count}/{total} 轮")
         if new_count >= total:
-            pending_finalize.append(lid)
+            if lid not in pending_finalize:
+                pending_finalize.append(lid)
             batch_ready = len(pending_finalize) >= BATCH_ROOMS
             log(f"  📋 加入归档队列 ({len(pending_finalize)}/{BATCH_ROOMS})")
         last_record[lid] = rec_start_t
+        status_data["previous_room_id"] = str(lid)
         retry_state.succeeded(lid)
         status_data["retry_exhausted_rooms"] = [item for item in
                                                   status_data.get("retry_exhausted_rooms", [])
@@ -965,10 +1069,23 @@ while True:
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
         last_record[lid] = now
+        status_data["previous_room_id"] = str(lid)
         entry = retry_state.failed(lid, "record_segment_failed")
         if entry["retry_exhausted"]:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
             _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
 
-publish_status("stopped" if stop_requested() else "finished", pending_rooms=len(pending_finalize))
+if natural_finished and pending_finalize and not stop_requested():
+    log(f"\n📦 自然结束归档尾批 {len(pending_finalize)} 间（配置阈值 {BATCH_ROOMS}）...")
+    pending_finalize = _finalize_pending_rooms(pending_finalize, finalize_room_once, stop_requested)
+    log(f"   尾批归档完成；{len(pending_finalize)} 间失败/待归档，原始数据保留")
+with capture_lock:
+    sink_lock.acquire()
+    state["capture_closed"] = True
+    state["scan_journal_path"] = None
+    sink_lock.release()
+publish_status("stopped" if stop_requested() else "finished", pending_rooms=len(pending_finalize),
+               pending_archive_rooms=list(pending_finalize),
+               pending_archive_reason=("主动停止，等待下次明确处理" if stop_requested() and pending_finalize
+                                       else "归档失败/校验未通过，保留原始数据" if pending_finalize else ""))

@@ -12,11 +12,13 @@
 
 ## 📖 简介
 
+当前控制台版本：2.7.0。录制参数支持全局默认、实例覆盖、JSON 预览导入/导出及每次运行快照；修改保存后于下次启动生效。
+
 **Taobao Live Scraper** 是一个专业的淘宝直播数据采集工具，专注于数字人直播间的监控、录制和分析。
 
 ### 核心功能
 
-**本地采集控制台（2.6）**：在本机网页管理最多 5 个 Edge 采集实例、直播网址清单、录制节奏、进度、环境检查和运行日志。控制台仅监听本机回环地址；只有点击“启动采集”后才启动采集任务。详见 [控制台使用说明](docs/control-panel.md)。
+**本地采集控制台（2.7）**：在本机网页管理最多 5 个 Edge 采集实例、直播网址清单、录制参数、进度、环境检查和运行日志。支持参数 JSON 配置与运行快照；修改保存后下次启动生效。控制台仅监听本机回环地址；只有点击“启动采集”后才启动采集任务。详见 [控制台使用说明](docs/control-panel.md)。
 
 ✅ **多实例并行录制** - 5个独立浏览器实例，同时监控不同直播间  
 ✅ **智能数字人检测** - 自动识别数字人主播直播间  
@@ -34,7 +36,7 @@
 
 ---
 
-### 控制台 2.6：快速启动与计数说明
+### 控制台 2.7：快速启动与计数说明
 
 **前置条件：** Python 3.9 或更高版本；安装 `requirements.txt` 中依赖（采集器需要 `DrissionPage`）；已安装 Edge、FFmpeg 和 FFprobe。控制台本身使用 Python 标准库提供本机网页服务，不依赖网页框架。首次打开后，在“录制设置”中配置数据目录及 Python、Edge、FFmpeg、FFprobe 路径，保存设置并通过“检查环境”后，再按需点击“启动采集”。
 
@@ -454,7 +456,7 @@ git push origin feature/your-feature-name
 
 ### Key Features
 
-**Local collection panel (2.6):** Manage up to five Edge crawler instances, URL lists, recording settings, environment checks, progress, and logs through a loopback-only web interface. Crawlers start only after an explicit click. See the [control panel guide](docs/control-panel.md).
+**Local collection panel (2.7):** Manage up to five Edge crawler instances, URL lists, recording settings, environment checks, progress, and logs through a loopback-only web interface. Crawlers start only after an explicit click. See the [control panel guide](docs/control-panel.md).
 
 ✅ **Multi-Instance Parallel Recording** - 5 independent browser instances monitoring different live rooms simultaneously  
 ✅ **Smart Digital Human Detection** - Automatically identify digital human anchor live rooms  
@@ -472,7 +474,7 @@ git push origin feature/your-feature-name
 
 ---
 
-### Control Panel 2.6: Quick Start and Metrics
+### Control Panel 2.7: Quick Start and Metrics
 
 **Prerequisites:** Python 3.9+, dependencies from `requirements.txt` (the crawler requires `DrissionPage`), Microsoft Edge, FFmpeg, and FFprobe. The panel web server uses Python's standard library and needs no web framework. On first launch, configure the data directory and Python, Edge, FFmpeg, and FFprobe paths in Recording Settings; save and pass Environment Check before explicitly starting collection.
 

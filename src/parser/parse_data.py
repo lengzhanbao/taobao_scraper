@@ -39,6 +39,21 @@ def api_name(url):
     m = re.search(r'mtop\.[\w.]+?(?=[/\?])', url_clean)
     return m.group(0) if m else ""
 
+
+def response_for_room_analysis(response, live_id):
+    """Filter explicit cross-room evidence from derived tables; raw JSON stays intact."""
+    if not isinstance(response, dict):
+        return False
+    if response.get("attribution_status") in ("conflict", "unscoped"):
+        return False
+    ids = response.get("live_ids") or []
+    observed = response.get("observed_live_id")
+    if observed is not None and str(observed) != str(live_id):
+        return False
+    if ids and str(live_id) not in {str(item) for item in ids}:
+        return False
+    return True
+
 def strip_jsonp(s):
     if not isinstance(s, str): return None
     s = s.strip()
@@ -204,6 +219,8 @@ def process_room(room_dir):
 
         groups = {}
         for c in data.get("responses", []):
+            if not response_for_room_analysis(c, live_id):
+                continue
             an = api_name(c.get("url", ""))
             if an: groups.setdefault(an, []).append(c)
 
