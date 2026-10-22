@@ -22,6 +22,7 @@ let settingsV27Supported = false;
 let statePollTimer = null;
 let statePollPeriod = 0;
 const timelineItems = new Map();
+const channelCards = new Map();
 const fieldLabels = {room_gap_seconds:["切换房间等待","秒","进入不同房间前等待；下次启动生效"],page_refresh_seconds:["页面重载间隔","秒","主动重载页面以触发新数据请求；下次启动生效"],status_refresh_seconds:["面板状态刷新","秒","只影响页面显示，不改变采集节奏"],checkpoint_seconds:["中途保存间隔","秒","定期保存状态用于中断恢复；下次启动生效"],listen_timeout_seconds:["监听等待超时","秒","单次监听最长等待，不代表固定采样频率"],scan_timeout_seconds:["页面扫描超时","秒","扫描步骤等待上限"],connect_timeout_seconds:["视频连接超时","秒","连接视频流等待上限"],captcha_timeout_seconds:["验证码等待上限","秒","等待人工完成验证码的最长时间"],stall_timeout_seconds:["断流检测时限","秒","判定录制无进展的等待上限"],max_record_attempts:["录制尝试次数","次","单段失败后的有限尝试上限"],failure_cooldown_minutes:["失败冷却","分钟","失败房间再次尝试前等待"],max_room_failures:["房间失败上限","次","达到后停止重复尝试"],max_collected:["内存预览上限","条","限制内存预览；完整数据仍写入文件"]};
 const $ = id => document.getElementById(id);
 const phaseNames = {starting:"等待启动",ready:"已就绪",waiting:"等待房间 / 冷却",scanning:"检查直播页面",captcha_required:"等待人工完成验证码",connecting:"连接视频流",recording:"录制中",validating:"视频时长校验",segment_completed:"本段已完成",segment_failed:"本段未通过校验",paused:"已暂停",archiving:"归档校验",login_required:"等待 Edge 登录",login_timeout:"登录超时",stopped:"已停止",finished:"已完成",exited:"进程已退出",failed:"失败"};
@@ -107,10 +108,45 @@ function progressBlock(completed,total,label) {
   const bar=document.createElement("progress");bar.max=100;bar.value=completed==null?0:percent(completed,total);bar.setAttribute("aria-label",label);
   box.append(text,bar);return box;
 }
+function renderChannelOverview() {
+  const grid=$("channel-overview-grid");
+  if(!grid||!state||!Array.isArray(state.instances))return;
+  for(const instance of state.instances.slice(0,5)) {
+    const job=state.jobs?.find(item=>item.instance_id===instance.id);
+    let parts=channelCards.get(instance.id);
+    if(!parts) {
+      const card=document.createElement("a");card.className="channel-card";card.href="#instance-row-"+instance.id;
+      const header=document.createElement("span");header.className="channel-card-head";
+      const name=document.createElement("strong");name.textContent="Edge "+instance.id;
+      const phase=document.createElement("span");phase.className="channel-phase";header.append(name,phase);
+      const current=document.createElement("span");current.className="channel-current";
+      const progress=document.createElement("span");progress.className="channel-progress";
+      const bar=document.createElement("progress");bar.max=100;bar.hidden=true;
+      bar.setAttribute("aria-label","Edge "+instance.id+" 技术有效进度");
+      card.append(header,current,progress,bar);grid.append(card);
+      parts={card,phase,current,progress,bar};channelCards.set(instance.id,parts);
+    }
+    const {card,phase,current,progress,bar}=parts;
+    card.className="channel-card"+(!connectionLost&&job?.alive&&job.phase!=="paused"?" is-running":"")+(!connectionLost&&job?.phase==="paused"?" is-paused":"");
+    const pending=pendingRoomCount(job?.status);
+    phase.textContent=connectionLost?"状态未知":job?.phase==="finished"&&pending>0?"待归档 "+pending+" 间":
+      job?(phaseNames[job.phase]||job.phase||"未知状态"):"未启动";
+    const status=job?.status;
+    current.textContent=connectionLost?"当前直播 · 未知":job?.alive&&status?.live_id?
+      "第 "+(Number.isFinite(status.segment_index)?status.segment_index:"未知")+" 段 · "+status.live_id:
+      job?.alive?"当前直播 · 未知":"当前无录制";
+    const completed=connectionLost?null:instance.completed_segments;
+    const target=instance.target_segments??(Number.isFinite(instance.recorded)&&Number.isFinite(instance.remaining)?instance.recorded+instance.remaining:null);
+    progress.textContent=completed==null?"技术有效进度 · 未核验":
+      "技术有效进度 · "+completed+" / "+(target==null?"未知":target)+" 段";
+    const showProgress=completed!=null&&target!=null&&target>0&&!connectionLost;
+    bar.hidden=!showProgress;if(showProgress)bar.value=percent(completed,target);
+  }
+}
 function renderInstances() {
   const tbody=$("instance-rows");
   if(!tbody.children.length) for(const i of state.instances) {
-    const tr=document.createElement("tr"); tr.dataset.id=i.id;
+    const tr=document.createElement("tr"); tr.dataset.id=i.id;tr.id="instance-row-"+i.id;
     const enabled=cell(""); const checkbox=document.createElement("input"); checkbox.type="checkbox"; checkbox.className="toggle"; checkbox.id="enabled-"+i.id; checkbox.setAttribute("aria-label","启用实例 "+i.id); enabled.append(checkbox); tr.append(enabled);
     tr.append(cell("Edge "+i.id,"端口 "+i.port+" · "+i.urls_file));
     const segments=cell("");const number=document.createElement("input");number.type="number";number.min=1;number.max=20;number.className="segment-input";number.id="segments-"+i.id;number.setAttribute("aria-label","实例 "+i.id+" 每房间段数");segments.append(number);tr.append(segments);
@@ -176,7 +212,7 @@ async function refreshState() {
       for(const id of ["url-instance","url-text","url-add-text","url-import","url-load","url-reload",
                        "url-save","url-append","correct-live-id","correct-count","correct-reason",
                        "correct-confirmed","correct-submit"]) $(id).disabled=true;
-      if(state) renderInstances();
+      if(state) {renderInstances();renderChannelOverview();}
     }
     throw error;
   }
@@ -190,7 +226,7 @@ async function refreshState() {
   $("run-summary").hidden=!settingsV27Supported;
   scheduleStatePoll();
   if(!dirty) fillSettings();
-  renderInstances();renderChecks(state.preflight);
+  renderInstances();renderChannelOverview();renderChecks(state.preflight);
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
   $("verified").textContent=Number.isFinite(state.totals.valid_segments)?state.totals.valid_segments:"未核验";
   $("archived").textContent=Number.isFinite(state.totals.archived_segments)?state.totals.archived_segments:"未核验";
@@ -507,6 +543,20 @@ async function timelineRefresh(loadMore=false) {
     $("timeline-gap").textContent="时间线读取失败："+error.message;
   } finally { timelineBusy=false; }
 }
+function setupSectionNavigation() {
+  if(typeof IntersectionObserver==="undefined"||typeof document.querySelectorAll!=="function")return;
+  const links=Array.from(document.querySelectorAll("aside .nav"));
+  const linkById=new Map(links.map(link=>[(link.getAttribute("href")||"").slice(1),link]));
+  const sections=Array.from(document.querySelectorAll("main[id], main section[id]"));
+  const observer=new IntersectionObserver(entries=>{
+    const visible=entries.filter(entry=>entry.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];
+    if(!visible)return;
+    const active=linkById.get(visible.target.id);if(!active)return;
+    for(const link of links)link.classList.toggle("active",link===active);
+  },{rootMargin:"-18% 0px -68% 0px",threshold:[0,.2,.5]});
+  for(const section of sections)observer.observe(section);
+}
+setupSectionNavigation();
 $("timeline-run").addEventListener("change",()=>{timelineReset($("timeline-run").value);timelineRefresh().catch(()=>{});});
 $("timeline-instance").addEventListener("change",()=>{timelineReset($("timeline-run").value);timelineRefresh().catch(()=>{});});
 $("timeline-refresh").addEventListener("click",()=>timelineRefresh().catch(()=>{}));

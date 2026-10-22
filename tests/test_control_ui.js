@@ -104,6 +104,25 @@ async function main() {
   assert.match(elements.get("timeline-events").textContent,/命令序号 9/);
   assert.match(elements.get("timeline-events").textContent,/完成当前段后停止/);
   await vm.runInContext("refresh()",context);
+  const panelHtml=fs.readFileSync(path.join(__dirname,"../src/control/web/index.html"),"utf8");
+  assert.doesNotMatch(panelHtml,/<div id="channel-overview-grid"[^>]*aria-live=/);
+  assert.ok(panelHtml.indexOf('id="channel-overview-grid"')<panelHtml.indexOf('id="instances"'));
+  assert.ok(panelHtml.indexOf('id="instances"')<panelHtml.indexOf('id="urls"'));
+  assert.ok(panelHtml.indexOf('id="urls"')<panelHtml.indexOf('id="settings"'));
+  const channels=elements.get("channel-overview-grid").children;
+  assert.equal(channels.length,5);
+  assert.match(channels[0].textContent,/Edge 1.*已暂停/s);
+  assert.match(channels[1].textContent,/Edge 2.*录制中.*第 1 段 · 123/s);
+  assert.match(channels[1].textContent,/技术有效进度 · 1 \/ 1 段/);
+  const recordingCard=channels[1];
+  const configuredEnabled=fixture.settings.instances[1].enabled;
+  fixture.settings.instances[1].enabled=false;
+  await vm.runInContext("refresh()",context);
+  assert.match(elements.get("channel-overview-grid").children[1].className,/is-running/);
+  assert.match(elements.get("channel-overview-grid").children[1].textContent,/录制中/);
+  fixture.settings.instances[1].enabled=configuredEnabled;
+  await vm.runInContext("refresh()",context);
+  assert.strictEqual(elements.get("channel-overview-grid").children[1],recordingCard);
   assert.equal(elements.get("setting-room_gap_seconds").value,0);
   assert.equal(elements.get("setting-room_gap_seconds").min,0);
   assert.equal(elements.get("instance-1-room_gap_seconds").value,"");
@@ -266,6 +285,7 @@ async function main() {
   assert.equal(elements.get("verified").textContent,"未核验");
   assert.match(elements.get("total-progress-text").textContent,/未核验/);
   assert.match(elements.get("instance-rows").children[0].children[4].textContent,/未核验/);
+  assert.match(elements.get("channel-overview-grid").children[0].textContent,/技术有效进度 · 未核验/);
   failState=true;
   await vm.runInContext('refresh()',context).catch(()=>{});
   assert.match(elements.get("connection-state").textContent,/正在重试/);
@@ -273,6 +293,13 @@ async function main() {
   assert.match(elements.get("connection-state").textContent,/连接中断/);
   assert.equal(elements.get("run-status").textContent,"后台连接中断");
   assert.match(elements.get("run-detail").textContent,/可能仍在运行/);
+  for(const card of elements.get("channel-overview-grid").children) {
+    assert.match(card.textContent,/状态未知/);
+    assert.match(card.textContent,/技术有效进度 · 未核验/);
+    assert.doesNotMatch(card.className,/is-running|is-paused/);
+    assert.equal(card.children.length,4);
+    assert.equal(card.children[3].hidden,true);
+  }
   assert.equal(elements.get("stop").disabled,true);
   assert.equal(elements.get("instance-rows").children[0].children[7].children[0].disabled,true);
   failState=false;
@@ -334,6 +361,7 @@ async function main() {
   await vm.runInContext('refresh()',context);
   assert.match(elements.get("run-status").textContent,/自然完成 · 2 间待归档/);
   assert.match(elements.get("run-detail").textContent,/自然结束尾批归档失败/);
+  assert.equal(elements.get("channel-overview-grid").children[2].children[0].children[1].textContent,"待归档 2 间");
   assert.equal(elements.get("run-dot").classList.contains("green"),false);
   fixture.jobs=[{instance_id:3,alive:false,phase:"finished",status:{}}];
   await vm.runInContext('refresh()',context);

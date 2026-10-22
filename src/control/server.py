@@ -32,7 +32,7 @@ from src.control.event_store import EventWriter, read_event_page, utc_now
 from src.control.operation_store import OperationStore
 
 CONTROL = ROOT / "_control"
-VERSION = "2.7.0-local-panel"
+VERSION = "2.7.1-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 OPERATION_STATUSES = {"accepted", "pending", "applied", "failed", "superseded", "timed_out"}
 
