@@ -24,7 +24,8 @@ def test_detail_url_pairing_and_late_or_missing_attribution():
                        {"liveId": "current", "liveUrl": "url-current"}]}
     assert detail_live_urls(parsed) == [("old", "url-old"), ("current", "url-current")]
     assert attribution_status(["old"], "current", "nav-current") == "conflict"
-    assert attribution_status([], "current", "nav-current") == "unknown"
+    assert attribution_status([], "current", "nav-current") == "context_only"
+    assert attribution_status([], "current", None) == "unknown"
     assert attribution_status(["current"], "current", "nav-current") == "matched"
     nested = {"rooms": [{"liveId": "current", "stream": {"liveUrl": "nested"}},
                         {"liveId": "other", "stream": {"liveUrl": "other-url"}}]}

@@ -14,7 +14,8 @@ from src.parser.parse_data import strip_jsonp, deep_find, safe_name, api_name, f
 from src.detector.detect_digital import parse_live_response, as_bool, find_keys
 from src.utils import config
 from src.crawler.recording import copy_scan_journal, product_in, record_segment
-from src.crawler.response_attribution import attribution_status, detail_live_urls
+from src.crawler.response_attribution import attribution_basis, attribution_status, detail_live_urls
+from src.utils.api_names import api_name
 from src.utils.digital_flags import find_values_by_key, parse_json_body, summarize_digital_flags, title_keywords_in_values
 from src.parser.parse_data import response_for_room_analysis
 
@@ -107,6 +108,7 @@ def _crawler_capture_namespace(tmp_path):
           "summarize_digital_flags": summarize_digital_flags,
           "title_keywords_in_values": title_keywords_in_values,
           "attribution_status": attribution_status, "detail_live_urls": detail_live_urls,
+          "attribution_basis": attribution_basis, "api_name": api_name,
           "publish_status": lambda *args, **kwargs: None, "process_pending_command": lambda: None,
           "stop_requested": lambda: False, "log": lambda *args: None,
           "sys": sys}
@@ -275,7 +277,8 @@ def test_live_detail_url_must_belong_to_matching_object_and_response_stays_attri
                      {"liveId": "456", "liveUrl": "other"}]}
     assert detail_live_urls(body) == [("123", "good"), ("456", "other")]
     assert attribution_status(["123", "456"], "123", "nav-1") == "conflict"
-    assert attribution_status([], "123", "nav-1") == "unknown"
+    assert attribution_status([], "123", "nav-1") == "context_only"
+    assert attribution_status([], "123", None) == "unknown"
 
 
 def test_parser_excludes_conflicting_room_comments_but_keeps_legacy_unknown():

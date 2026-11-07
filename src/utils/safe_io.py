@@ -9,6 +9,25 @@ import subprocess
 import uuid
 
 
+def _finite_number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _rate(value):
+    """Parse ffprobe r_frame_rate such as 25/1 or 30000/1001."""
+    if not isinstance(value, str) or "/" not in value:
+        return _finite_number(value)
+    numerator, denominator = value.split("/", 1)
+    numerator, denominator = _finite_number(numerator), _finite_number(denominator)
+    if numerator is None or denominator in (None, 0):
+        return None
+    return numerator / denominator
+
+
 def atomic_json(path, payload, backup=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +88,144 @@ def probe_video(path, ffprobe):
     if not math.isfinite(duration) or duration <= 0 or not has_video:
         raise ValueError("视频没有有效时长或视频轨道")
     return duration
+
+
+def probe_first_packet(path, ffprobe, selector):
+    """Return the first packet PTS in seconds, or None when unavailable.
+
+    This is media time, not wall clock. A missing value is left unknown rather
+    than guessed from the container duration.
+    """
+    try:
+        result = subprocess.run(
+            [str(ffprobe), "-v", "error", "-select_streams", selector,
+             "-show_entries", "packet=pts_time,dts_time", "-read_intervals", "%+#1",
+             "-of", "json", str(path)],
+            capture_output=True, timeout=40,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            return None
+        packets = json.loads(result.stdout).get("packets", [])
+        if not isinstance(packets, list) or not packets:
+            return None
+        packet = packets[0]
+        if not isinstance(packet, dict):
+            return None
+        value = _finite_number(packet.get("pts_time"))
+        return value if value is not None else _finite_number(packet.get("dts_time"))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+
+
+def probe_media(path, ffprobe):
+    """Read factual media metadata; absent audio never becomes a guessed value."""
+    result = subprocess.run(
+        [str(ffprobe), "-v", "error", "-show_entries",
+         "format=duration:stream=codec_type,codec_name,width,height,"
+         "r_frame_rate,avg_frame_rate,start_time,duration", "-of", "json", str(path)],
+        capture_output=True, timeout=40,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode:
+        raise ValueError("ffprobe 无法读取视频")
+    try:
+        info = json.loads(result.stdout)
+        streams = info.get("streams", [])
+        duration = _finite_number(info.get("format", {}).get("duration"))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("ffprobe 返回的媒体信息不完整")
+    if not isinstance(streams, list):
+        streams = []
+    video = next((item for item in streams if isinstance(item, dict)
+                  and item.get("codec_type") == "video"), None)
+    audio = next((item for item in streams if isinstance(item, dict)
+                  and item.get("codec_type") == "audio"), None)
+    video_duration = _finite_number(video.get("duration")) if video else None
+    audio_duration = _finite_number(audio.get("duration")) if audio else None
+    return {
+        "duration_seconds": duration,
+        "has_video": video is not None,
+        "has_audio": audio is not None,
+        "video_codec": video.get("codec_name") if video else None,
+        "audio_codec": audio.get("codec_name") if audio else None,
+        "video_duration_seconds": video_duration if video_duration is not None else duration,
+        "audio_duration_seconds": (audio_duration if audio_duration is not None
+                                   else duration if audio else None),
+        "video_width": int(video["width"]) if video and type(video.get("width")) is int else None,
+        "video_height": int(video["height"]) if video and type(video.get("height")) is int else None,
+        "video_fps": (_rate(video.get("avg_frame_rate")) or _rate(video.get("r_frame_rate"))
+                      if video else None),
+        "video_start_time": _finite_number(video.get("start_time")) if video else None,
+        "audio_start_time": _finite_number(audio.get("start_time")) if audio else None,
+        "first_video_pts": probe_first_packet(path, ffprobe, "v:0") if video else None,
+        "first_audio_pts": probe_first_packet(path, ffprobe, "a:0") if audio else None,
+    }
+
+
+def iter_jsonl(path):
+    """Yield parsed JSON lines without silently skipping malformed records."""
+    with Path(path).open(encoding="utf-8") as stream:
+        for number_, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                yield json.loads(line)
+            except ValueError as error:
+                raise ValueError(f"JSONL 第 {number_} 行不是有效 JSON") from error
+
+
+def atomic_jsonl(path, rows, backup=False):
+    """Write one JSON object per line atomically; optionally preserve prior bytes."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if backup and path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
+    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    with temp.open("x", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, path)
+
+
+def atomic_json_with_raw_array(path, fields, array_key, raw_items, backup=False):
+    """Write JSON whose array items are already-encoded JSON text.
+
+    Long response journals are streamed straight into the final artifact, so the
+    complete evidence is kept without holding every parsed response in memory.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if backup and path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
+    if not isinstance(fields, dict) or array_key in fields:
+        raise ValueError("数组字段必须独立于普通字段")
+    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    with temp.open("x", encoding="utf-8") as stream:
+        encoded = json.dumps(fields, ensure_ascii=False, indent=2).rstrip()
+        if not encoded.endswith("}"):
+            raise ValueError("字段序列化结果无效")
+        body = encoded[:-1].rstrip()
+        stream.write(body)
+        if body.strip() != "{":
+            stream.write(",\n  ")
+        else:
+            stream.write("\n  ")
+        stream.write(json.dumps(array_key, ensure_ascii=False) + ": [")
+        first = True
+        for raw in raw_items:
+            text = str(raw).strip()
+            if not text:
+                continue
+            stream.write("\n    " if first else ",\n    ")
+            stream.write(text)
+            first = False
+        stream.write("\n  ]\n}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, path)
 
 
 class PortLock:

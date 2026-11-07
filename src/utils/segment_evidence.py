@@ -1,5 +1,6 @@
 """Recording evidence and observations; never changes source recordings."""
 import csv
+import datetime
 import json
 import math
 from pathlib import Path
@@ -21,13 +22,27 @@ def number(value):
         return None
 
 
+TARGET_DURATION_RATIO = 0.9
+
+
 def minimum_duration(data):
     minutes = number(data.get("max_minutes"))
     return min(420.0, minutes * 60 * 0.9) if minutes is not None and 1 <= minutes <= 120 else 420.0
 
 
-def video_validation(video, data, ffprobe, probe=None):
-    """Measure media duration; wall clock and file size cannot establish duration."""
+def target_duration(data):
+    """Planned media duration, only when the configured segment length is known."""
+    minutes = number(data.get("max_minutes"))
+    return minutes * 60 if minutes is not None and 1 <= minutes <= 120 else None
+
+
+def video_validation(video, data, ffprobe, probe=None, media_probe=None):
+    """Measure media duration; wall clock and file size cannot establish duration.
+
+    ``probe`` keeps the existing duration-only contract for callers and tests.
+    ``media_probe`` optionally adds audio/codec/first-PTS facts. Its failure is
+    recorded as unknown media facts instead of changing the validity decision.
+    """
     before = Path(video).stat()
     duration = (probe or probe_video)(video, ffprobe)
     minimum = minimum_duration(data)
@@ -37,9 +52,121 @@ def video_validation(video, data, ffprobe, probe=None):
     after = Path(video).stat()
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
         raise ValueError("核验期间视频仍在变化；保留文件并稍后核验")
-    return {"schema_version": 1, "valid": True, "duration_source": "ffprobe",
-            "duration_seconds": duration, "minimum_duration_seconds": minimum,
-            "video_sha256": checksum, "validated_t": time.time()}
+    result = {"schema_version": 1, "valid": True, "duration_source": "ffprobe",
+              "duration_seconds": duration, "minimum_duration_seconds": minimum,
+              "video_sha256": checksum, "validated_t": time.time()}
+    if media_probe is not None:
+        try:
+            media = media_probe(video, ffprobe)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            media = None
+        if isinstance(media, dict):
+            result["media"] = media
+    return result
+
+
+def recording_quality(data):
+    """Separate technical validity, planned-duration achievement and media facts.
+
+    The threshold is an observation of the plan, not a claim that the segment is
+    usable for every research question. Missing facts stay ``None``; a 7-minute
+    file can remain technically valid while ``target_duration_met`` is false.
+    """
+    proof = data.get("technical_validation")
+    proof = proof if isinstance(proof, dict) else {}
+    media = proof.get("media") if isinstance(proof.get("media"), dict) else data.get("media_facts")
+    media = media if isinstance(media, dict) else {}
+    actual = number(data.get("video_duration_seconds"))
+    if actual is None:
+        actual = number(proof.get("duration_seconds"))
+    target = target_duration(data)
+    ratio = (actual / target) if actual is not None and target else None
+    met = (ratio >= TARGET_DURATION_RATIO) if ratio is not None else None
+    technical_valid = validation_matches(data) if proof else False
+    has_video = media.get("has_video")
+    has_video = bool(has_video) if isinstance(has_video, bool) else (True if technical_valid else None)
+    if technical_valid and met is True:
+        state = "technical_valid_target_met"
+    elif technical_valid and met is False:
+        state = "technical_valid_target_not_met"
+    elif technical_valid:
+        state = "technical_valid_target_unknown"
+    else:
+        state = "technically_invalid"
+    return {
+        "schema_version": 1,
+        "quality_state": state,
+        "technical_valid": technical_valid,
+        "duration_source": "ffprobe" if actual is not None else None,
+        "technical_minimum_seconds": minimum_duration(data),
+        "target_duration_seconds": target,
+        "actual_duration_seconds": actual,
+        "duration_completion_ratio": round(ratio, 4) if ratio is not None else None,
+        "target_duration_met": met,
+        "target_duration_threshold": TARGET_DURATION_RATIO,
+        "has_video": has_video,
+        "has_audio": media.get("has_audio") if isinstance(media.get("has_audio"), bool) else None,
+        "video_codec": media.get("video_codec"),
+        "audio_codec": media.get("audio_codec"),
+        "video_duration_seconds": (number(media.get("video_duration_seconds"))
+                                   if media.get("video_duration_seconds") is not None else actual),
+        "audio_duration_seconds": number(media.get("audio_duration_seconds")),
+        "video_width": media.get("video_width"),
+        "video_height": media.get("video_height"),
+        "video_fps": number(media.get("video_fps")),
+        "note": ("技术有效、目标时长达成与科研可用性是三个独立判断；"
+                 "缺少音轨或编码事实时保持 unknown，不推断可用性"),
+    }
+
+
+def timing_evidence(data, media=None, events=None):
+    """Keep wall-clock, media and response-received time bases explicitly apart."""
+    media = media if isinstance(media, dict) else (
+        data.get("technical_validation", {}).get("media")
+        if isinstance(data.get("technical_validation"), dict)
+        and isinstance(data.get("technical_validation", {}).get("media"), dict) else {})
+    start = number(data.get("record_start_t"))
+    end = number(data.get("record_end_t"))
+    first_data = number(data.get("first_video_data_t"))
+    duration = number(data.get("video_duration_seconds"))
+    window = (end - start) if start is not None and end is not None and end > start else None
+    first_video_pts = number(media.get("first_video_pts"))
+    first_audio_pts = number(media.get("first_audio_pts"))
+    if start is not None and first_data is not None:
+        alignment = "approximate"
+    else:
+        alignment = "unresolved"
+    def iso(epoch):
+        return (datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
+                .isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                if epoch is not None else None)
+    return {
+        "schema_version": 1,
+        "recording_id": data.get("recording_id"),
+        "live_id": data.get("live_id") or data.get("observed_live_id"),
+        "record_start_wall_time": start,
+        "record_start_wall_time_iso": iso(start),
+        "record_end_wall_time": end,
+        "record_end_wall_time_iso": iso(end),
+        "first_video_data_wall_time": first_data,
+        "first_video_data_wall_time_iso": iso(first_data),
+        "video_duration_seconds": duration,
+        "audio_duration_seconds": number(media.get("audio_duration_seconds")),
+        "first_video_pts": first_video_pts,
+        "first_audio_pts": first_audio_pts,
+        "time_basis": "wall_clock_from_ffmpeg_launch",
+        "media_time_basis": "ffprobe_pts_seconds",
+        "alignment_status": alignment,
+        "alignment_uncertainty_ms": None,
+        "wall_clock_media_window_delta_seconds": (round(window - duration, 3)
+                                                  if window is not None and duration is not None else None),
+        "mapping": {"formula": "t_media ≈ t_wall - record_start_wall_time - delta",
+                    "reference_wall_time": start, "delta_seconds": None,
+                    "delta_source": "not_estimated", "note": "未估计时延时不把 delta 默认为零而宣称精确对齐"},
+        "response_received_time_basis": "capture_listener_wall_clock",
+        "event_time_basis": "derived_from_response_received_time",
+        "events": list(events or []),
+    }
 
 
 def validation_matches(data):
@@ -56,59 +183,79 @@ def validation_matches(data):
             and len(proof["video_sha256"]) == 64)
 
 
-def digital_observation(data, live_id):
-    """Record all captured, unambiguously linked detail flags, with no sample rule."""
-    flags, titles, times = [], [], []
-    detail_count = matched = missing = ambiguous = outside = untimed = 0
-    start, end = number(data.get("record_start_t")), number(data.get("record_end_t"))
-    responses = data.get("responses", [])
-    if not isinstance(responses, list):
-        responses = []
-    for response in responses:
+class DigitalObservationCollector:
+    """Single-pass accumulator so journals need not be held in memory twice."""
+
+    def __init__(self, live_id, start_t=None, end_t=None, media_duration=None):
+        self.live_id = str(live_id) if live_id is not None else None
+        self.start, self.end = start_t, end_t
+        self.media_duration = media_duration
+        self.flags, self.titles, self.times = [], [], []
+        self.detail_count = self.matched = self.missing = 0
+        self.ambiguous = self.outside = self.untimed = 0
+
+    def observe(self, response):
         if not isinstance(response, dict) or "live.detail.get" not in str(response.get("url", "")):
-            continue
-        detail_count += 1
+            return
+        self.detail_count += 1
         parsed = parse_json_body(response.get("body"))
         ids = {str(item) for item in find_values_by_key(parsed, "liveId") if item is not None}
-        if ids != {str(live_id)}:
-            ambiguous += 1
-            continue
-        matched += 1
+        if ids != {self.live_id}:
+            self.ambiguous += 1
+            return
+        self.matched += 1
         values = find_values_by_key(parsed, "isDigitalAnchorLive")
-        flags.extend(values)
+        self.flags.extend(values)
         if not values:
-            missing += 1
-        titles.extend(find_values_by_key(parsed, "liveTitle") or find_values_by_key(parsed, "title"))
+            self.missing += 1
+        self.titles.extend(find_values_by_key(parsed, "liveTitle") or find_values_by_key(parsed, "title"))
         captured = number(response.get("t"))
-        if captured is None or start is None or end is None or end <= start:
-            untimed += 1
-        elif start <= captured <= end:
+        if captured is None or self.start is None or self.end is None or self.end <= self.start:
+            self.untimed += 1
+        elif self.start <= captured <= self.end:
             if values:
-                times.append(captured)
+                self.times.append(captured)
         else:
-            outside += 1
-    summary = summarize_digital_flags(flags)
-    observed = summary["all_true"] if summary["true_count"] + summary["false_count"] else None
-    window = end - start if start is not None and end is not None and end > start else None
-    times = sorted(set(times))
-    max_gap = None
-    if window is not None:
-        points = [start, *times, end]
-        max_gap = max(b - a for a, b in zip(points, points[1:]))
-    return {"all_true": observed, "flag_summary": summary,
-            "title_keywords": list(title_keywords_in_values(titles)),
-            "detail_response_count": detail_count, "matched_response_count": matched,
-            "missing_flag_response_count": missing, "unlinked_response_count": ambiguous,
-            "outside_recording_response_count": outside, "untimed_response_count": untimed,
-            "in_recording_flagged_response_count": len(times),
-            "first_flag_t": times[0] if times else None, "last_flag_t": times[-1] if times else None,
-            "maximum_observation_gap_seconds": max_gap,
-            "recording_window_seconds": window,
-            "media_duration_seconds": number(data.get("video_duration_seconds")),
-            "wall_clock_media_delta_seconds": (window - float(data["video_duration_seconds"])
-                if window is not None and number(data.get("video_duration_seconds")) is not None else None),
-            "observation_basis": "captured_matching_detail_responses_only",
-            "coverage_note": "仅表示已捕获标记；未证明整个录制期间始终全true，无覆盖阈值分类"}
+            self.outside += 1
+
+    def result(self):
+        summary = summarize_digital_flags(self.flags)
+        observed = summary["all_true"] if summary["true_count"] + summary["false_count"] else None
+        window = (self.end - self.start if self.start is not None and self.end is not None
+                  and self.end > self.start else None)
+        times = sorted(set(self.times))
+        max_gap = None
+        if window is not None:
+            points = [self.start, *times, self.end]
+            max_gap = max(b - a for a, b in zip(points, points[1:]))
+        return {"all_true": observed, "flag_summary": summary,
+                "title_keywords": list(title_keywords_in_values(self.titles)),
+                "detail_response_count": self.detail_count, "matched_response_count": self.matched,
+                "missing_flag_response_count": self.missing, "unlinked_response_count": self.ambiguous,
+                "outside_recording_response_count": self.outside,
+                "untimed_response_count": self.untimed,
+                "in_recording_flagged_response_count": len(times),
+                "first_flag_t": times[0] if times else None,
+                "last_flag_t": times[-1] if times else None,
+                "maximum_observation_gap_seconds": max_gap,
+                "recording_window_seconds": window,
+                "media_duration_seconds": self.media_duration,
+                "wall_clock_media_delta_seconds": (window - self.media_duration
+                    if window is not None and self.media_duration is not None else None),
+                "observation_basis": "captured_matching_detail_responses_only",
+                "coverage_note": "仅表示已捕获标记；未证明整个录制期间始终全true，无覆盖阈值分类"}
+
+
+def digital_observation(data, live_id):
+    """Record all captured, unambiguously linked detail flags, with no sample rule."""
+    collector = DigitalObservationCollector(
+        live_id, number(data.get("record_start_t")), number(data.get("record_end_t")),
+        number(data.get("video_duration_seconds")))
+    responses = data.get("responses", [])
+    if isinstance(responses, list):
+        for response in responses:
+            collector.observe(response)
+    return collector.result()
 
 
 def observation_counts(records):
