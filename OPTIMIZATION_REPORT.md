@@ -40,6 +40,7 @@
 | 内存/磁盘 | 最终 JSON 把 journal 全部读入 Python 列表后再 `json.dump`，峰值约为全部响应的对象内存 | 最终 JSON 仍内嵌 `responses`（兼容），但按 journal 逐行流式写入；新增 `responses_journal`、`captured_count`、`journal_sha256` | `src/utils/safe_io.py`、`src/crawler/recording.py` | 已完成（兼容模式） |
 | 归档输出 | 归档 manifest 只有 JSON/视频/弹幕/汇总 | 新增会话级商品事件、区间、质量、时间文件，并写入 `analysis_files` / `analysis_summary` | `src/parser/parse_data.py` | 已完成 |
 | 旧数字人工具 | `collect_digital.py` 仍把响应正文截断到 800,000 字符 | 保留完整正文并记录 `body_truncated=false` / `body_original_chars` | `src/detector/collect_digital.py` | 已完成 |
+| 平台身份 | `店铺ID` 在 shopId 缺失时回退 accountId，可能混用两种 ID | 保留旧列兼容，同时新增 `平台liveId`、`平台shopId`、`平台accountId`、`平台bizCode`，缺失留空 | `src/parser/parse_data.py` | 已完成 |
 | 控制台 | 只有技术有效、完整归档、数字人标记计数 | 增加目标时长达成段数、缺失音轨段数；不与技术有效段混算 | `src/control/server.py`、`src/control/web/*` | 已完成 |
 | 旧格式兼容 | 无统一兼容说明 | 旧最终 JSON 可解析；`technical_validation` 仍 schema 1；旧 `unscoped` 可读；差异派生文件先备份 | 多个文件 | 已完成 |
 
@@ -80,7 +81,7 @@
 | `tests/test_core.py` | 归属判断期望改为 `context_only`；为 AST 抽取的监听函数补充新依赖 |
 | `tests/test_capture_runtime.py` | 同上，并补充无导航上下文时为 `unknown` |
 | `tests/test_control_simulation.py` | 录制成功/失败测试增加流式最终 JSON、研究文件与失败状态断言；AST 命名空间补充台账/质量/API 依赖 |
-| `tests/test_research_upgrade.py` | 新增 12 个测试，覆盖本轮新增行为 |
+| `tests/test_research_upgrade.py` | 新增 13 个测试，覆盖本轮新增行为 |
 
 ---
 
@@ -121,7 +122,14 @@
 - 能区分“本来不符合条件”和“网络/登录/接流/核验失败”；
 - 成功记录关联 `recording_id`、时长与目标达成状态。
 
-### 4.6 内存优化
+### 4.6 平台身份字段
+
+- 汇总 CSV 新增 `平台liveId`、`平台shopId`、`平台accountId`、`平台bizCode`；
+- 缺失时留空，不用其他 ID 代替；
+- 旧 `店铺ID` 列保留原回退逻辑，仅用于历史兼容；
+- 不自动合并不同 `liveId` 为 `room_group`。
+
+### 4.7 内存优化
 
 - journal 仍是完整原文来源；
 - 最终 JSON `responses` 仍内嵌，保持旧解析器兼容；
@@ -268,10 +276,10 @@ python -m pytest tests/ -q
 
 ```text
 python -m pytest tests/ -q
-110 passed, 3 subtests passed in 88.11s
+111 passed, 3 subtests passed in 87.32s
 ```
 
-新增 12 个测试，覆盖：
+新增 13 个测试，覆盖：
 
 - 20 分钟收益下的目标达成率与 7 分钟“技术有效但目标未达成”；
 - 无音轨与媒体事实 unknown；
@@ -319,6 +327,7 @@ python -m py_compile <本轮修改的 Python 文件>
 6. **归档分析文件未纳入逐文件复核**：manifest 记录 SHA256，但 `inspect_archive` 仍只核验原四类文件。
 7. **价格与 SKU 覆盖有限**：只记录响应中出现的字段，不枚举全部 SKU，不推断未出现的原价。
 8. **恢复路径不补质量字段**：对账生成的进度凭据可能缺少质量字段，控制台显示 unknown。
+9. **旧 `店铺ID` 列仍可能混用 ID**：新列已拆分并保留原始值，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
 
 ---
 
@@ -329,6 +338,7 @@ python -m py_compile <本轮修改的 Python 文件>
   - `8be5092e` — `feat: add recording quality and attribution evidence foundations`
   - `d4d6d5e4` — `feat: record product events, timing evidence and collection attempts`
   - `5b91e1ed` — `feat: export research artifacts and separate quality metrics in the panel`
+  - `10b43506` — `fix: tighten media validation and expose raw platform identifiers`
 - 本报告提交：见 `git log -1`。
 - 是否推送远程：**否**。
 - 工作区：提交后应为 clean（`git status --porcelain` 无输出）。
