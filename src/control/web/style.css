@@ -58,7 +58,7 @@ button.primary:hover { border-color: #FC7A49; background: #FC7A49; color: var(--
 .message { margin: 0 0 13px; padding: 11px 14px; border: 1px solid #B9DAD1; border-radius: 8px; background: #E7F3EF; color: #145C50; font-size: 12px; }
 .message.error { border-color: #E7C1B8; background: #FBECE8; color: #8B342D; }
 [hidden] { display: none !important; }
-.verification-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 11px; }
+.verification-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 11px; }
 .verification-strip article { min-width: 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: 9px; background: var(--white); box-shadow: var(--shadow); }
 .verification-strip article span { display: block; color: var(--muted); font-size: 11px; }
 .verification-strip article strong { display: block; margin: 4px 0; color: var(--teal); font: 600 25px/1.15 Consolas, monospace; font-variant-numeric: tabular-nums; }

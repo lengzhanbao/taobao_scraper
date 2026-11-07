@@ -217,7 +217,7 @@ async function refreshState() {
     throw error;
   }
   state=latest;token=state.token;refreshFailures=0;connectionLost=false;
-  settingsV27Supported=/^2\.7\./.test(state.version||"")&&Object.keys(fieldLabels).every(key=>
+  settingsV27Supported=/^2\.(7|8)\./.test(state.version||"")&&Object.keys(fieldLabels).every(key=>
     state.runtime_fields?.[key]&&Object.prototype.hasOwnProperty.call(state.settings||{},key))&&
     state.settings.instances?.every(instance=>["max_minutes","cooldown_minutes","room_gap_seconds","page_refresh_seconds"].every(key=>Object.prototype.hasOwnProperty.call(instance,key)));
   $("settings-version-note").hidden=settingsV27Supported;
@@ -230,6 +230,11 @@ async function refreshState() {
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
   $("verified").textContent=Number.isFinite(state.totals.valid_segments)?state.totals.valid_segments:"未核验";
   $("archived").textContent=Number.isFinite(state.totals.archived_segments)?state.totals.archived_segments:"未核验";
+  const qualityKnown=Number.isFinite(state.totals.target_duration_met_segments);
+  const qualityUnknown=state.totals.quality_unknown_segments??0;
+  $("target-met").textContent=qualityKnown?state.totals.target_duration_met_segments:"未核验";
+  $("target-met-note").textContent=qualityKnown?(state.totals.target_duration_not_met_segments+" 段技术有效但未达目标"+(qualityUnknown?"；"+qualityUnknown+" 段目标未知":"")):"先核验录制凭据再统计目标达成";
+  $("audio-missing").textContent=Number.isFinite(state.totals.audio_missing_segments)?state.totals.audio_missing_segments:"未核验";
   $("verified-note").textContent=state.totals.unverified_rooms?"至少为已核验数量；"+state.totals.unverified_rooms+" 间房缺少凭据":"依据视频与 final JSON 凭据复核";
   const markers=state.totals.digital_markers;
   const markerCountsKnown=markers&&["all_true","not_all_true","missing"].every(key=>Number.isFinite(markers[key]));

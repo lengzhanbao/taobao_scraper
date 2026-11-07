@@ -32,7 +32,7 @@ from src.control.event_store import EventWriter, read_event_page, utc_now
 from src.control.operation_store import OperationStore
 
 CONTROL = ROOT / "_control"
-VERSION = "2.7.1-local-panel"
+VERSION = "2.8.0-local-panel"
 TERMINAL_PHASES = {"stopped", "finished", "login_timeout", "failed"}
 OPERATION_STATUSES = {"accepted", "pending", "applied", "failed", "superseded", "timed_out"}
 
@@ -53,6 +53,9 @@ def _receipt_matches(request, receipt):
 def summarize_rows(rows):
     target = sum(row["target"] for row in rows)
     completed = sum(min(row["count"], row["target"]) for row in rows)
+    quality_records = [value for row in rows
+                       for value in (row.get("quality_records") or {}).values()
+                       if isinstance(value, dict)]
     known = [row["valid_count"] for row in rows if row.get("valid_count") is not None]
     unknown = sum(row.get("valid_count") is None for row in rows)
     verified = sum(known)
@@ -73,10 +76,19 @@ def summarize_rows(rows):
             "unverified_rooms": unknown, "target_segments": target,
             "completed_segments": verified_completed, "progress_percent": progress_percent,
             "progress_state": "unverified" if not known and unknown else
-                              "partial" if unknown else "verified"}
+                              "partial" if unknown else "verified",
+            "target_duration_met_segments": sum(
+                item.get("target_duration_met") is True for item in quality_records),
+            "target_duration_not_met_segments": sum(
+                item.get("target_duration_met") is False for item in quality_records),
+            "audio_missing_segments": sum(item.get("has_audio") is False
+                                          for item in quality_records),
+            "quality_unknown_segments": sum(
+                item.get("target_duration_met") is None for item in quality_records)}
 
 
-def verified_progress_records(progress, study_root, observations=None, cache=None, parsed_cache=None):
+def verified_progress_records(progress, study_root, observations=None, cache=None,
+                              parsed_cache=None, qualities=None):
     """Return receipt identities, historical counts and per-room receipt state."""
     if not isinstance(progress, dict):
         return {}, {}, {}
@@ -137,7 +149,8 @@ def verified_progress_records(progress, study_root, observations=None, cache=Non
                         continue
                     summary = {key: final.get(key) for key in (
                         "recorded_files", "technical_validation", "video_duration_seconds",
-                        "max_minutes", "recording_id", "segment_index", "record_start_t", "record_end_t")}
+                        "max_minutes", "recording_id", "segment_index", "record_start_t",
+                        "record_end_t", "recording_quality")}
                     summary["digital_observation"] = digital_observation(final, live_id)
                     if len(parsed_cache) >= 2048:
                         parsed_cache.clear()
@@ -161,6 +174,18 @@ def verified_progress_records(progress, study_root, observations=None, cache=Non
                 identities.add(str(receipt["recording_id"]))
                 if observations is not None:
                     observations.setdefault(live_id, {})[str(receipt["recording_id"])] = copy.deepcopy(final["digital_observation"])
+                if qualities is not None:
+                    embedded = final.get("recording_quality")
+                    embedded = embedded if isinstance(embedded, dict) else {}
+                    qualities.setdefault(live_id, {})[str(receipt["recording_id"])] = {
+                        "technical_valid": True,
+                        "quality_state": receipt.get("quality_state") or embedded.get("quality_state"),
+                        "target_duration_met": (receipt.get("target_duration_met")
+                                                if "target_duration_met" in receipt
+                                                else embedded.get("target_duration_met")),
+                        "has_audio": (receipt.get("has_audio") if "has_audio" in receipt
+                                      else embedded.get("has_audio")),
+                    }
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 continue
         if receipts:
@@ -453,9 +478,10 @@ class Manager:
         progress = load_json(Path(config["study_root"]) / "_control" /
                              f"progress_{instance['port']}.json", {})
         observations = {}
+        qualities = {}
         valid_records, legacy_counts, receipt_states = verified_progress_records(
             progress, config["study_root"], observations, self.evidence_cache,
-            self._progress_parse_cache)
+            self._progress_parse_cache, qualities)
         archive_bundle = self.archive_bundle(config["study_root"], config["ffprobe"])
         archive_records = archive_bundle["records"]
         corrections = read_count_corrections(config["study_root"]) if snapshot is None else {}
@@ -484,6 +510,7 @@ class Manager:
             row["digital_observations"] = {**archive_bundle["observations"].get(live_id, {}),
                                             **observations.get(live_id, {})}
             row["digital_markers"] = observation_counts(row["digital_observations"])
+            row["quality_records"] = qualities.get(live_id, {})
             row["archive_issues"] = archive_bundle["issues"].get(live_id, [])
             if row["valid_count"] is None:
                 row['validation_state'] = '未核验'
@@ -978,6 +1005,8 @@ class Manager:
                             "valid_record_ids": sorted(merged_ids),
                             "digital_observations": {**previous.get("digital_observations", {}),
                                                      **row["digital_observations"]},
+                            "quality_records": {**previous.get("quality_records", {}),
+                                                **row.get("quality_records", {})},
                             "archived_count": max(previous["archived_count"], row["archived_count"]),
                         }
             totals["rooms"] = len(distinct)
@@ -1000,6 +1029,17 @@ class Manager:
             totals["progress_percent"] = (round(completed_valid * 100 / totals["target_segments"], 1)
                                           if totals["target_segments"] and
                                           (known_counts or not unverified_rooms) else None)
+            quality_values = [value for room in distinct.values()
+                              for value in (room.get("quality_records") or {}).values()
+                              if isinstance(value, dict)]
+            totals["target_duration_met_segments"] = sum(
+                value.get("target_duration_met") is True for value in quality_values)
+            totals["target_duration_not_met_segments"] = sum(
+                value.get("target_duration_met") is False for value in quality_values)
+            totals["audio_missing_segments"] = sum(
+                value.get("has_audio") is False for value in quality_values)
+            totals["quality_unknown_segments"] = sum(
+                value.get("target_duration_met") is None for value in quality_values)
             run_id = str(self.run.get("run_id", ""))
             controller_gap = any(writer.telemetry_gap for (writer_run, _), writer in self._event_writers.items()
                                  if writer_run == run_id)
@@ -1152,3 +1192,4 @@ def main():
         webbrowser.open(origin)
     print("本地控制台: " + origin, flush=True)
     server.serve_forever()
+

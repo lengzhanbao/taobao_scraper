@@ -29,6 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 汇总 CSV 增加段落与 room 层的全 true、含 false、缺失标记和段数；false 段标记为排除候选并保留原始证据。
 - 标题含“虚拟主播”或“智能主播”时按研究口径标记数字人，同时保留平台原始标记。
 
+## [2.8.0] - 2026-11-07
+
+### Added
+- 录制质量三分解：技术有效性（旧口径不变）、目标时长达成（默认 90%）、音视频事实（音轨、编码、分辨率、帧率、首包 PTS）。缺失事实保持 unknown，不推断科研可用性。
+- 每次录制尝试新增 `recording_quality.json`、`timing_evidence.json`、`product_events.jsonl`、`product_intervals.jsonl`；失败段也保留可分析的质量、时间与商品证据。
+- `product_events.jsonl` 记录商品 ID、SKU、名称、角色、原始价格与单位依据、来源 API、响应序号、接收时间、归属等级与证据路径；不再默认 `curItemList[0]` 或列表第一项是当前讲解商品。
+- 响应归属新增 `context_only`，并把旧 `unscoped` 兼容映射到 `context_only`；严格派生表只接受 `matched`，冲突、仅上下文和未知原始响应全部保留。
+- 采集尝试台账 `collection_attempts_instance_<N>.jsonl`：区分未开播/非数字人/网络/验证码/接流/录制/核验失败，并关联 `recording_id`。
+- 会话归档新增 `sessions/<房间>/product_events.jsonl`、`product_intervals.jsonl`、`recording_quality.json`、`timing_evidence.json`，并写入 `archive_manifest.json` 的 `analysis_files` 与 `analysis_summary`。
+- 控制台分别显示目标时长达成段数与缺失音轨段数，不与技术有效段数混算。
+
+### Changed
+- 最终 JSON 升级到 schema 2：以响应 journal 为完整原文来源，`responses` 仍按兼容要求内嵌，但改为流式写入，避免终结阶段把全部响应重复加载进内存；同时记录 `responses_journal`、`captured_count`、`journal_sha256`。
+- 解析器在 `responses` 为空时可回退读取 journal；旧版最终 JSON（无质量、时间、商品事件字段）仍可解析。
+- 旧数字人收集器不再把响应正文静默截断到 800,000 字符。
+
+### Compatibility
+- 不删除、不改写已有视频、JSON/JSONL、CSV、弹幕和历史日志；重新解析只生成派生文件，内容不同时先保留备份。
+- `technical_validation` 仍为 schema 1；旧归档清单 schema 2 的核验逻辑保持可用。
+- 旧 `unscoped` 与缺少 `attribution_status` 的历史响应按保守规则读取，不强行重新归属。
+
 ## [2.7.1] - 2026-10-22
 
 ### Changed

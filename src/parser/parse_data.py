@@ -11,10 +11,17 @@ if hasattr(sys.stderr, "reconfigure"):
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT, FFPROBE
-from src.utils.safe_io import atomic_json, verified_copy, probe_video
-from src.utils.segment_evidence import video_validation, digital_observation, file_evidence
+from src.utils.safe_io import (atomic_json, atomic_jsonl, iter_jsonl, probe_media,
+                               verified_copy, probe_video)
+from src.utils.segment_evidence import (digital_observation, file_evidence,
+                                        recording_quality, timing_evidence,
+                                        video_validation)
 from pathlib import Path
 import uuid
+from src.utils.api_names import api_name
+from src.crawler.response_attribution import normalize_attribution_status
+from src.parser.product_events import (extract_product_events, latest_current_candidate,
+                                       product_intervals, summarize_product_events)
 from src.utils.digital_flags import (
     classify_digital_segment, find_values_by_key,
     summarize_digital_flags, summarize_room_digital_flags,
@@ -34,18 +41,18 @@ def fmt(ts):
 def safe_name(s):
     return re.sub(r'[\\/*?:"<>|\s]', '_', s).strip('_')
 
-def api_name(url):
-    url_clean = re.sub(r'_(\d{6,})\b', '', url)
-    m = re.search(r'mtop\.[\w.]+?(?=[/\?])', url_clean)
-    return m.group(0) if m else ""
-
-
 def response_for_room_analysis(response, live_id):
-    """Filter explicit cross-room evidence from derived tables; raw JSON stays intact."""
+    """Only explicit current-room evidence feeds strict derived tables.
+
+    Raw responses remain intact in the journal. Rows written before grades
+    existed keep the old conservative rule so historical re-parses do not
+    silently change; graded rows must be ``matched``.
+    """
     if not isinstance(response, dict):
         return False
-    if response.get("attribution_status") in ("conflict", "unscoped"):
-        return False
+    if "attribution_status" in response:
+        if normalize_attribution_status(response.get("attribution_status")) != "matched":
+            return False
     ids = response.get("live_ids") or []
     observed = response.get("observed_live_id")
     if observed is not None and str(observed) != str(live_id):
@@ -142,6 +149,121 @@ def comment_capture_state(responses, row_count):
             "row_count": row_count, "response_count": len(responses), "failed_response_count": failures}
 
 
+def segment_responses(data):
+    """Read embedded responses when present; otherwise fall back to the journal."""
+    responses = data.get("responses")
+    if isinstance(responses, list):
+        return responses
+    journal = data.get("responses_journal")
+    if journal and Path(journal).is_file():
+        try:
+            return list(iter_jsonl(journal))
+        except (OSError, ValueError):
+            return []
+    return []
+
+
+def write_derived_jsonl(path, rows):
+    """Regenerate derived JSONL; keep a verified backup if prior content differs."""
+    path = Path(path)
+    content = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    if path.exists():
+        try:
+            previous = path.read_text(encoding="utf-8")
+        except OSError:
+            previous = None
+        if previous == content:
+            return
+        if previous is not None:
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
+            except OSError:
+                pass
+    atomic_jsonl(path, rows)
+
+
+def write_derived_json(path, payload):
+    """Regenerate a derived JSON summary; preserve differing prior bytes."""
+    path = Path(path)
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2)
+    if path.exists():
+        try:
+            previous = path.read_text(encoding="utf-8")
+        except OSError:
+            previous = None
+        if previous == encoded:
+            return
+        if previous is not None:
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
+            except OSError:
+                pass
+    atomic_json(path, payload)
+
+
+def segment_quality(data, measured, duration):
+    """Recompute quality from measured media; never trust a stale embedded copy."""
+    return recording_quality({**data, "video_duration_seconds": duration,
+                              "technical_validation": measured})
+
+
+def segment_timing(data, measured, duration):
+    return timing_evidence({**data, "video_duration_seconds": duration,
+                            "technical_validation": measured},
+                           events=data.get("record_events"))
+
+
+def segment_product_evidence(data, live_id, recording_id, segment_index, run_id, responses):
+    """Load per-attempt product artifacts, else derive them from raw responses."""
+    events, intervals = None, None
+    event_path = data.get("product_events_journal")
+    if event_path and Path(event_path).is_file():
+        try:
+            events = [event for event in iter_jsonl(event_path) if isinstance(event, dict)]
+        except (OSError, ValueError):
+            events = None
+    if events is None:
+        context = {"run_id": run_id, "recording_id": recording_id, "live_id": live_id,
+                   "segment_index": segment_index, "record_start_t": data.get("record_start_t")}
+        events = []
+        for response in responses:
+            events.extend(extract_product_events(response, context))
+    interval_path = data.get("product_intervals_journal")
+    if interval_path and Path(interval_path).is_file():
+        try:
+            intervals = [item for item in iter_jsonl(interval_path) if isinstance(item, dict)]
+        except (OSError, ValueError):
+            intervals = None
+    if intervals is None:
+        intervals = product_intervals(events)
+    summary = data.get("product_event_summary")
+    if not isinstance(summary, dict) or summary.get("schema_version") != 1:
+        summary = summarize_product_events(events, intervals)
+    return events, intervals, summary
+
+
+def yn(value):
+    return "是" if value is True else "否" if value is False else "未知"
+
+
+def segment_attribution_summary(data, responses):
+    summary = data.get("response_attribution_summary")
+    if isinstance(summary, dict) and summary.get("schema_version") == 1:
+        return summary
+    counts = {"matched": 0, "context_only": 0, "conflict": 0, "unknown": 0}
+    missing = 0
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        if response.get("attribution_status") is None:
+            missing += 1
+        status = normalize_attribution_status(response.get("attribution_status"))
+        counts[status] = counts.get(status, 0) + 1
+    return {"schema_version": 1, "total": len(responses), "by_status": counts,
+            "missing_status_count": missing, "high_confidence": counts["matched"],
+            "policy": "only matched rows enter strict room statistics"}
+
+
 def process_room(room_dir):
     """一个房间所有段 → 1个店铺文件夹 + 1汇总CSV + N弹幕CSV
     步骤: 1)复制JSON到sessions/raw 2)从副本解析"""
@@ -175,12 +297,13 @@ def process_room(room_dir):
         if not source_video.is_relative_to(Path(room_dir).resolve()) or not source_video.is_file():
             raise ValueError("视频缺失或路径超出本房间，保留原始数据")
         # Preflight all media before creating archive copies. Never trust wall clock.
-        measured[fp] = video_validation(source_video, metadata, FFPROBE, probe=probe_video)
+        measured[fp] = video_validation(source_video, metadata, FFPROBE, probe=probe_video,
+                                        media_probe=probe_media)
 
     # —— 从第一个文件提取店铺名 ——
     first = json.load(open(files[0], encoding="utf-8"))
     groups_tmp = {}
-    for c in first.get("responses", []):
+    for c in segment_responses(first):
         an = api_name(c.get("url", ""))
         if an: groups_tmp.setdefault(an, []).append(c)
     dc_tmp = groups_tmp.get("mtop.roomstudio.live.detail.get", [])
@@ -213,12 +336,17 @@ def process_room(room_dir):
     rows = []
     segment_flag_summaries = []
     segment_titles_by_row = []
+    quality_records = []
+    timing_records = []
+    all_product_events = []
+    all_product_intervals = []
     for fi, fp in enumerate(copied):
         print(f"  段{fi+1}: {os.path.basename(fp)[:30]}...")
         data = json.load(open(fp, encoding="utf-8"))
+        responses = segment_responses(data)
 
         groups = {}
-        for c in data.get("responses", []):
+        for c in responses:
             if not response_for_room_analysis(c, live_id):
                 continue
             an = api_name(c.get("url", ""))
@@ -247,8 +375,19 @@ def process_room(room_dir):
                 elif not live.get(key):
                     live[key] = v
 
-        observation = digital_observation({**data, "video_duration_seconds": measured[files[fi]]["duration_seconds"]}, live_id)
+        rec_dur = measured[files[fi]]["duration_seconds"]
+        observation = digital_observation(
+            {**data, "responses": responses, "video_duration_seconds": rec_dur}, live_id)
         segment_flag_summary = observation["flag_summary"]
+        quality = segment_quality(data, measured[files[fi]], rec_dur)
+        timing = segment_timing(data, measured[files[fi]], rec_dur)
+        recording_id = str(data.get("recording_id") or os.path.basename(fp)
+                           .replace("data_", "").replace("_final.json", ""))
+        product_events, product_ivs, product_summary = segment_product_evidence(
+            data, live_id, recording_id, data.get("segment_index", fi + 1),
+            data.get("run_id"), responses)
+        attribution_summary = segment_attribution_summary(data, responses)
+        current_product = latest_current_candidate(product_events)
 
         _title = live.get("title") or live.get("liveTitle") or ""
         _anchor = live.get("accountName") or live.get("anchorName") or ""
@@ -286,28 +425,39 @@ def process_room(room_dir):
             if ag is None: ag = deep_find(o, "agentShop")
             if isinstance(ag, str): agent_shop_flag = "是" if ag.lower() == "true" else "否"
 
-        # 商品信息：callback.query → curItemList[0]，备用 videodetail → itemListv1[0].liveItemDO
+        # 商品信息：优先使用事件化的“当前商品候选”，绝不把列表第一项当当前商品。
         _item_name = ""; _item_price = ""; _live_promo_price = ""
-        # 方式1: item.callback.query → curItemList
-        cq = groups.get("mtop.tblive.live.item.callback.query", [])
-        if cq:
-            cq_parsed = [strip_jsonp(c.get("body","")) for c in cq if strip_jsonp(c.get("body",""))]
-            if cq_parsed:
-                cil = deep_find(cq_parsed[-1], "curItemList") or []
-                if isinstance(cil, list) and cil:
-                    _item_name = cil[0].get("itemName", "")
-                    p = cil[0].get("itemPrice")
-                    if p is not None: _item_price = p
-                    lip = cil[0].get("liveItemPrice") or {}
-                    pp = lip.get("promotionPrice") if isinstance(lip, dict) else None
-                    if pp:
-                        try: _live_promo_price = int(pp) / 100
-                        except: _live_promo_price = pp
-        # 方式2: item.getvideodetailitemlistwithpagination → itemListv1[0].liveItemDO
-        if not _item_name:
+        _item_id = ""; _item_attribution = ""
+        if current_product:
+            _item_name = current_product.get("item_name") or ""
+            _item_id = current_product.get("item_id") or ""
+            _item_attribution = current_product.get("attribution_status") or ""
+            if current_product.get("display_price") is not None:
+                _item_price = current_product["display_price"]
+            if current_product.get("promotion_price") is not None:
+                _live_promo_price = current_product["promotion_price"]
+        elif not product_events:
+            # Legacy payload without recognizable product structures: keep the
+            # old extraction only as a last-resort compatibility path.
+            cq = groups.get("mtop.tblive.live.item.callback.query", [])
+            if cq:
+                cq_parsed = [strip_jsonp(c.get("body", "")) for c in cq
+                             if strip_jsonp(c.get("body", ""))]
+                if cq_parsed:
+                    cil = deep_find(cq_parsed[-1], "curItemList") or []
+                    if isinstance(cil, list) and cil:
+                        _item_name = cil[0].get("itemName", "")
+                        p = cil[0].get("itemPrice")
+                        if p is not None: _item_price = p
+                        lip = cil[0].get("liveItemPrice") or {}
+                        pp = lip.get("promotionPrice") if isinstance(lip, dict) else None
+                        if pp:
+                            try: _live_promo_price = int(pp) / 100
+                            except: _live_promo_price = pp
             il = groups.get("mtop.tblive.live.item.getvideodetailitemlistwithpagination", [])
-            if il:
-                il_parsed = [strip_jsonp(c.get("body","")) for c in il if strip_jsonp(c.get("body",""))]
+            if not _item_name and il:
+                il_parsed = [strip_jsonp(c.get("body", "")) for c in il
+                             if strip_jsonp(c.get("body", ""))]
                 if il_parsed:
                     ilv1 = deep_find(il_parsed[-1], "itemListv1") or []
                     if isinstance(ilv1, list) and ilv1:
@@ -424,10 +574,39 @@ def process_room(room_dir):
             "粉丝数(开始)": start_fans if start_fans is not None else "",
             "粉丝数(结束)": end_fans if end_fans is not None else "",
             "新增粉丝量": new_fans,
+            # 以下为 2.8.0 研究数据升级字段；旧列名与旧计数保持不变。
+            "目标时长(秒)": (round(quality["target_duration_seconds"], 1)
+                             if quality.get("target_duration_seconds") is not None else ""),
+            "时长达成率": (quality["duration_completion_ratio"]
+                           if quality.get("duration_completion_ratio") is not None else ""),
+            "目标时长达成": yn(quality.get("target_duration_met")),
+            "是否含音轨": yn(quality.get("has_audio")),
+            "音频时长(秒)": (quality.get("audio_duration_seconds")
+                             if quality.get("audio_duration_seconds") is not None else ""),
+            "视频编码": quality.get("video_codec") or "",
+            "音频编码": quality.get("audio_codec") or "",
+            "分辨率": (f"{quality['video_width']}x{quality['video_height']}"
+                       if quality.get("video_width") and quality.get("video_height") else ""),
+            "帧率": quality.get("video_fps") if quality.get("video_fps") is not None else "",
+            "归属明确响应数": attribution_summary["by_status"].get("matched", 0),
+            "归属仅上下文响应数": attribution_summary["by_status"].get("context_only", 0),
+            "归属冲突响应数": attribution_summary["by_status"].get("conflict", 0),
+            "归属未知响应数": attribution_summary["by_status"].get("unknown", 0),
+            "归属状态缺失响应数": attribution_summary.get("missing_status_count", 0),
+            "商品事件数": product_summary.get("event_count", 0),
+            "不同商品ID数": product_summary.get("distinct_item_ids", 0),
+            "商品区间数": product_summary.get("interval_count", 0),
+            "当前商品ID": _item_id,
+            "当前商品候选来源": (current_product.get("role_evidence") if current_product else ""),
+            "当前商品归属等级": _item_attribution,
         }
         rows.append(row)
         segment_flag_summaries.append(segment_flag_summary)
         segment_titles_by_row.append(title_hits)
+        quality_records.append({"recording_id": recording_id, **quality})
+        timing_records.append({"recording_id": recording_id, **timing})
+        all_product_events.extend(product_events)
+        all_product_intervals.extend(product_ivs)
 
         # 该段的弹幕单独CSV
         sess_dir = os.path.join(SESSIONS, pair_str)
@@ -466,7 +645,11 @@ def process_room(room_dir):
                                  "comment_extraction": comment_state,
                                  "duration_seconds": rec_dur,
                                  "technical_validation": measured[files[fi]],
-                                 "digital_observation": observation})
+                                 "digital_observation": observation,
+                                 "recording_quality": quality,
+                                 "timing_evidence": timing,
+                                 "response_attribution_summary": attribution_summary,
+                                 "product_event_summary": product_summary})
         print(f"    📹 第{fi+1}段: {duration:.1f}秒，SHA256 校验通过")
 
     # 汇总CSV
@@ -516,17 +699,66 @@ def process_room(room_dir):
         )
         print(f"  汇总: lives_summary_{pair_str}.csv ({len(rows)}行)")
 
-    # Evidence is per file, including source identity/hash, rather than a folder count.
+    # —— 研究用派生文件：商品事件、质量与时间证据 ——
     sess_dir = os.path.join(SESSIONS, pair_str)
+    os.makedirs(sess_dir, exist_ok=True)
+    product_events_path = Path(sess_dir) / "product_events.jsonl"
+    product_intervals_path = Path(sess_dir) / "product_intervals.jsonl"
+    quality_path = Path(sess_dir) / "recording_quality.json"
+    timing_path = Path(sess_dir) / "timing_evidence.json"
+    quality_summary = {
+        "schema_version": 1,
+        "recording_count": len(quality_records),
+        "technical_valid_count": sum(item.get("technical_valid") is True for item in quality_records),
+        "target_duration_met_count": sum(item.get("target_duration_met") is True for item in quality_records),
+        "target_duration_not_met_count": sum(item.get("target_duration_met") is False for item in quality_records),
+        "target_duration_unknown_count": sum(item.get("target_duration_met") is None for item in quality_records),
+        "audio_present_count": sum(item.get("has_audio") is True for item in quality_records),
+        "audio_missing_count": sum(item.get("has_audio") is False for item in quality_records),
+        "audio_unknown_count": sum(item.get("has_audio") is None for item in quality_records),
+        "note": "技术有效、目标时长达成、含音轨与科研可用性是独立维度",
+    }
+    timing_summary = {
+        "schema_version": 1,
+        "recording_count": len(timing_records),
+        "approximate_count": sum(item.get("alignment_status") == "approximate"
+                                 for item in timing_records),
+        "unresolved_count": sum(item.get("alignment_status") == "unresolved"
+                                for item in timing_records),
+        "note": "墙钟、媒体 PTS 与接口接收时间分别记录；未估计的时延保持 null",
+    }
+    product_summary = summarize_product_events(all_product_events, all_product_intervals)
+    attribution_totals = {"matched": 0, "context_only": 0, "conflict": 0, "unknown": 0,
+                          "missing_status_count": 0}
+    for segment in archive_segments:
+        summary = segment.get("response_attribution_summary") or {}
+        for status, count in (summary.get("by_status") or {}).items():
+            attribution_totals[status] = attribution_totals.get(status, 0) + int(count or 0)
+        attribution_totals["missing_status_count"] += int(summary.get("missing_status_count") or 0)
+
+    # Evidence is per file, including source identity/hash, rather than a folder count.
     for index in range(1, len(files) + 1):
         comments = os.path.join(sess_dir, "crawler", f"comments_第{index}段_{pair_str}.csv")
         if not os.path.isfile(comments):
             raise ValueError("缺少段落弹幕 CSV")
     if not rows or not os.path.isfile(sp) or len(archive_entries) != 2 * len(files):
         raise ValueError("归档文件不完整")
+    write_derived_jsonl(product_events_path, all_product_events)
+    write_derived_jsonl(product_intervals_path, all_product_intervals)
+    write_derived_json(quality_path, {"schema_version": 1, "room_id": live_id,
+                                      "recordings": quality_records, "summary": quality_summary})
+    write_derived_json(timing_path, {"schema_version": 1, "room_id": live_id,
+                                     "recordings": timing_records, "summary": timing_summary})
+    analysis_files = [file_evidence(path) for path in
+                      (product_events_path, product_intervals_path, quality_path, timing_path)]
     atomic_json(os.path.join(sess_dir, "archive_manifest.json"),
                 {"schema_version": 2, "room_id": live_id, "segment_count": len(files), "entries": archive_entries,
                  "segments": archive_segments, "summary": file_evidence(sp),
+                 "analysis_files": analysis_files,
+                 "analysis_summary": {"recording_quality": quality_summary,
+                                      "timing_evidence": timing_summary,
+                                      "product_events": product_summary,
+                                      "response_attribution": attribution_totals},
                  "source_preserved": True}, backup=True)
     print(f"  ARCHIVE_COPY_OK: {len(files)} 段，逐文件校验，源文件保留")
     print(f"  文件夹: {pair_str}")
