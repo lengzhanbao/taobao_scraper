@@ -3,6 +3,7 @@
 All media and responses here are synthetic. No browser, Taobao account or real
 research directory is used.
 """
+import csv
 import json
 import time
 from pathlib import Path
@@ -210,6 +211,7 @@ def test_product_intervals_need_two_observed_boundaries():
     same = extract_product_events(
         product_response("mtop.tblive.live.item.callback.query", [item()],
                          sequence=3, received_at=1090.0), CONTEXT)
+    assert len(first + same) == 2
     assert product_intervals(first + same) == []
     summary = summarize_product_events(first + second, intervals)
     assert summary["event_count"] == 2 and summary["interval_count"] == 1
@@ -230,6 +232,18 @@ def test_response_filter_excludes_new_unknown_but_keeps_legacy_rows():
     assert parse_data.response_for_room_analysis(response(None, [LIVE_ID], LIVE_ID), LIVE_ID)
     assert parse_data.response_for_room_analysis(response(None, [], None), LIVE_ID)
     assert not parse_data.response_for_room_analysis(response(None, ["old"], "old"), LIVE_ID)
+
+
+def test_derived_jsonl_preserves_differing_prior_content(tmp_path):
+    path = tmp_path / "product_events.jsonl"
+    path.write_text('{"old": 1}\n', encoding="utf-8")
+    parse_data.write_derived_jsonl(path, [{"new": 2}])
+    assert path.read_text(encoding="utf-8") == '{"new": 2}\n'
+    backups = list(tmp_path.glob("product_events.jsonl.bak_*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == '{"old": 1}\n'
+    parse_data.write_derived_jsonl(path, [{"new": 2}])
+    assert len(list(tmp_path.glob("product_events.jsonl.bak_*"))) == 1
 
 
 def test_console_counts_target_duration_and_audio_separately():
@@ -298,7 +312,9 @@ def test_parse_data_writes_research_artifacts_and_keeps_old_json_readable(tmp_pa
     responses = [
         {"t": 1001.0, "received_at": 1001.0, "url": "https://h5api.m.taobao.com/h5/mtop.roomstudio.live.detail.get/1.0/",
          "body": json.dumps({"data": {"liveId": LIVE_ID, "isDigitalAnchorLive": "true",
-                                      "liveTitle": "测试直播", "accountName": "测试店"}}),
+                                      "liveTitle": "测试直播", "accountName": "测试店",
+                                      "shopId": "shop-1", "accountId": "acc-1",
+                                      "bizCode": "TMALL"}}),
          "response_sequence": 1, "live_ids": [LIVE_ID], "observed_live_id": LIVE_ID,
          "navigation_id": "nav", "attribution_status": "matched"},
         product_response("mtop.tblive.live.item.callback.query", [item()], sequence=2,
@@ -338,8 +354,13 @@ def test_parse_data_writes_research_artifacts_and_keeps_old_json_readable(tmp_pa
     assert any(item["destination"].endswith("recording_quality.json")
                for item in manifest["analysis_files"])
     summary_csv = next((session / "crawler").glob("lives_summary_*.csv"))
+    with summary_csv.open(encoding="utf-8-sig", newline="") as stream:
+        summary_rows = list(csv.DictReader(stream))
     header = summary_csv.read_text(encoding="utf-8-sig").splitlines()[0]
     assert "目标时长达成" in header and "商品事件数" in header
+    assert summary_rows[0]["平台shopId"] == "shop-1"
+    assert summary_rows[0]["平台accountId"] == "acc-1"
+    assert summary_rows[0]["平台bizCode"] == "TMALL"
 
     # A pre-2.8 final JSON without quality/timing/product fields still parses.
     old_final = dict(final)

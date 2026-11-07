@@ -265,6 +265,7 @@ class Checks(unittest.TestCase):
                 return real_stream_write(path, fields, key, items, **kwargs)
             with patch("src.crawler.recording.subprocess.Popen", side_effect=launch), \
                     patch("src.crawler.recording.probe_video", return_value=600), \
+                    patch("src.crawler.recording.probe_media", side_effect=OSError("synthetic media")), \
                     patch("src.crawler.recording.stop_recorder"), \
                     patch("src.crawler.recording.time.sleep"), \
                     patch("src.crawler.recording.atomic_json", side_effect=write), \
@@ -352,6 +353,7 @@ class Checks(unittest.TestCase):
         identifiers = iter(uuid.UUID(int=value) for value in (1, 2, 3))
         with patch("src.crawler.recording.subprocess.Popen", side_effect=launch), \
                 patch("src.crawler.recording.probe_video", return_value=600), \
+                patch("src.crawler.recording.probe_media", side_effect=OSError("synthetic media")), \
                 patch("src.crawler.recording.stop_recorder"), \
                 patch("src.crawler.recording.datetime", SimpleNamespace(datetime=FixedDatetime)), \
                 patch("src.crawler.recording.time", FixedTime), \

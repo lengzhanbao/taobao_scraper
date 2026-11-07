@@ -570,6 +570,11 @@ def process_room(room_dir):
             "品类": live.get("categoryLevelOneName", ""),
             "店铺ID": live.get("shopId", "") or live.get("accountId", ""),
             "店铺类型": live.get("bizCode", ""),
+            # 原始平台标识单列保存；缺失时留空，不再用其他 ID 静默代替。
+            "平台liveId": live_id,
+            "平台shopId": live.get("shopId", ""),
+            "平台accountId": live.get("accountId", ""),
+            "平台bizCode": live.get("bizCode", ""),
             "主播认证": anchor_cert, "是否代理店": agent_shop_flag,
             "粉丝数(开始)": start_fans if start_fans is not None else "",
             "粉丝数(结束)": end_fans if end_fans is not None else "",

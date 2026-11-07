@@ -234,7 +234,7 @@
 | `navigation_id` | 页面导航上下文 |
 | `response_sequence` | 该响应在本次扫描中的序号 |
 | `source_api` | 来源 API |
-| `received_at` | 接口响应被监听到的墙钟时间（秒） |
+| `received_at` / `event_received_at` | 接口响应被监听到的墙钟时间（秒）；两字段同值，后者便于按事件语义读取 |
 | `event_relative_seconds` | 相对录制起始墙钟的秒数 |
 | `item_id` / `sku_id` / `item_name` | 商品身份；`item_id` 保留原始字符串，不用名称代替 ID |
 | `item_role` | `current_candidate` / `listed` / `unknown`（本轮不生成 `current_confirmed`） |
@@ -357,6 +357,19 @@
 
 这些统计可以由 `product_events.jsonl` 直接计算。**本轮不生成口播与商品的匹配结论**；ASR 接入后应使用事件时间、商品 ID 与证据路径另行研究。
 
+### 5.7 平台身份字段
+
+汇总 CSV 新增原始平台标识列：
+
+| 列 | 说明 |
+|---|---|
+| `平台liveId` | 当前房间的 liveId |
+| `平台shopId` | 平台返回的 shopId；缺失留空 |
+| `平台accountId` | 平台返回的 accountId；缺失留空 |
+| `平台bizCode` | 平台业务类型；缺失留空 |
+
+旧列 `店铺ID` 为兼容历史分析保留，仍按旧的 `shopId or accountId` 回退。新的研究分析应优先使用 `平台shopId` / `平台accountId`，不要把回退值当成同一身份。采集器不会把不同 `liveId` 合并成 `room_group`；如论文需要按店铺或账号分组，应在分析阶段另建映射表并记录来源。
+
 ---
 
 ## 6. 时间证据：墙钟、媒体时间、接口时间分开
@@ -421,7 +434,7 @@
 
 ### 6.3 对齐状态
 
-- `approximate`：有录制起点和首次数据时间，可以做近似映射；仍不声称毫秒级准确；
+- `approximate`：有录制起点、首次数据时间和实测媒体时长，可以做近似映射；仍不声称毫秒级准确；
 - `unresolved`：缺少必要时间点，不能建立映射；
 - 当前不输出虚假的 `alignment_uncertainty_ms`，也不把 `delta` 默认为 0。
 
@@ -533,6 +546,7 @@
 8. **归档派生文件未纳入 `inspect_archive` 的逐文件复核**：manifest 已记录其 SHA256，但现有归档完整性核验仍聚焦 JSON/视频/弹幕/汇总。
 9. **控制台质量计数依赖进度凭据**：只有归档清单的房间不会推断目标达成或音轨状态。
 10. **旧恢复路径不补写质量字段**：启动对账生成的凭据可能没有质量字段，控制台显示 unknown，而不是猜测。
+11. **旧 `店铺ID` 列仍保留回退逻辑**：新列 `平台shopId` / `平台accountId` 已分开保存，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
 
 ---
 

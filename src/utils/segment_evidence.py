@@ -62,6 +62,9 @@ def video_validation(video, data, ffprobe, probe=None, media_probe=None):
             media = None
         if isinstance(media, dict):
             result["media"] = media
+        final = Path(video).stat()
+        if (before.st_size, before.st_mtime_ns) != (final.st_size, final.st_mtime_ns):
+            raise ValueError("核验期间视频仍在变化；保留文件并稍后核验")
     return result
 
 
@@ -132,7 +135,7 @@ def timing_evidence(data, media=None, events=None):
     window = (end - start) if start is not None and end is not None and end > start else None
     first_video_pts = number(media.get("first_video_pts"))
     first_audio_pts = number(media.get("first_audio_pts"))
-    if start is not None and first_data is not None:
+    if start is not None and first_data is not None and duration is not None:
         alignment = "approximate"
     else:
         alignment = "unresolved"

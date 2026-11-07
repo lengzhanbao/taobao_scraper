@@ -141,6 +141,7 @@ def _item_event(item, *, context, api, role, role_evidence, evidence_path, index
         "response_sequence": source_sequence,
         "source_api": api,
         "received_at": received_at,
+        "event_received_at": received_at,
         "event_relative_seconds": relative,
         "item_id": item_id,
         "sku_id": sku_id,
