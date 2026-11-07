@@ -56,6 +56,13 @@ page = ChromiumPage(co)
 page.listen.start()
 
 def drain_responses(wait_sec=6):
+    """Keep complete bodies; digital detection must not depend on a preview cut.
+
+    The main crawler writes full bodies to a journal and keeps only a bounded
+    in-memory preview. This legacy scanner has no journal, so it keeps the full
+    body plus explicit truncation metadata instead of silently cutting at
+    800,000 characters. Callers should release the list after each room.
+    """
     deadline = time.time() + wait_sec
     out = []
     while time.time() < deadline:
@@ -66,7 +73,10 @@ def drain_responses(wait_sec=6):
                     body = resp.response.body
                     if isinstance(body, dict):
                         body = json.dumps(body, ensure_ascii=False)
-                    out.append({"url": url, "body": str(body)[:800000]})
+                    text = str(body)
+                    out.append({"url": url, "body": text,
+                                "body_truncated": False,
+                                "body_original_chars": len(text)})
         except Exception:
             time.sleep(0.3)
     return out

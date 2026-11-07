@@ -15,8 +15,9 @@ import time
 import uuid
 
 from src.utils.config import STUDY_ROOT, FFPROBE
-from src.utils.safe_io import atomic_json, digest
-from src.utils.segment_evidence import video_validation, digital_observation, number
+from src.utils.safe_io import atomic_json, digest, probe_media
+from src.utils.segment_evidence import (digital_observation, number, recording_quality,
+                                        timing_evidence, video_validation)
 
 MIN_SEC = 420
 ROOT = Path(__file__).resolve().parent
@@ -39,7 +40,7 @@ def assess(data_path, staging, ffprobe):
     video = Path(source_files[0]).resolve()
     if not video.is_relative_to(staging) or video.parent != data_path.parent or not video.is_file():
         raise ValueError("对应视频不存在或不在同一个 staging 段/attempt 目录")
-    proof = video_validation(video, data, ffprobe)
+    proof = video_validation(video, data, ffprobe, media_probe=probe_media)
     duration = proof["duration_seconds"]
     if duration < MIN_SEC:
         raise ValueError(f"FFprobe 实测 {duration:.1f} 秒，不足历史段要求的 420 秒")
@@ -71,6 +72,8 @@ def assess(data_path, staging, ffprobe):
                      recovery_source_sha256=digest(data_path))
     candidate.setdefault("recording_id", "recovered-" + digest(data_path)[:16] + "-" + proof["video_sha256"][:16])
     candidate["digital_observation"] = digital_observation(candidate, live_id)
+    candidate["recording_quality"] = recording_quality(candidate)
+    candidate["timing_evidence"] = timing_evidence(candidate, events=candidate.get("record_events"))
     candidate_eligible = (complete_capture and number(data.get("record_start_t")) is not None
                           and type(data.get("segment_index")) is int and data["segment_index"] > 0)
     return {"source_json": str(data_path), "video": str(video), "live_id": live_id,

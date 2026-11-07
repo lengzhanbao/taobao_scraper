@@ -1,6 +1,7 @@
 """Recording attempts retain every source file, including failed attempts."""
 import datetime
 from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,9 +9,15 @@ import re
 import subprocess
 import time
 import uuid
-from src.utils.safe_io import atomic_json, probe_video
-from src.utils.segment_evidence import video_validation, digital_observation
+from src.utils.api_names import api_name
+from src.utils.safe_io import (atomic_json, atomic_json_with_raw_array, atomic_jsonl,
+                               probe_video, probe_media)
+from src.utils.segment_evidence import (DigitalObservationCollector, digital_observation,
+                                        recording_quality, timing_evidence, video_validation)
 from src.utils.runtime_options import read_runtime_options
+from src.crawler.response_attribution import normalize_attribution_status
+from src.parser.product_events import (CURRENT_ROLES, extract_product_events,
+                                       product_intervals, summarize_product_events)
 
 
 _SECRET_QUERY = re.compile(r"(?i)([?&](?:token|access_token|auth[_-]?key|sign|signature|secret|sid|key|session|ticket)=)[^&#\s]+")
@@ -124,6 +131,111 @@ def _timeline_from_responses(responses, live_id, start_t, end_t):
     return timeline
 
 
+def _journal_evidence(path, *, live_id, run_id, recording_id, segment_index, start_t, end_t,
+                      media_duration=None):
+    """One bounded-memory pass over the journal for every derived fact."""
+    collector = DigitalObservationCollector(live_id, start_t, end_t, media_duration)
+    events, legacy_timeline = [], []
+    status_counts = {"matched": 0, "context_only": 0, "conflict": 0, "unknown": 0}
+    api_counts, missing_status = {}, 0
+    captured, checksum = 0, hashlib.sha256()
+    legacy_current, legacy_start = None, 0.0
+    with Path(path).open("rb") as stream:
+        for raw_line in stream:
+            checksum.update(raw_line)
+            if not raw_line.strip():
+                continue
+            response = json.loads(raw_line.decode("utf-8"))
+            captured += 1
+            collector.observe(response)
+            status = normalize_attribution_status(response.get("attribution_status"))
+            if response.get("attribution_status") is None:
+                missing_status += 1
+            status_counts[status] = status_counts.get(status, 0) + 1
+            api = api_name(response.get("url"))
+            if api:
+                api_counts[api] = api_counts.get(api, 0) + 1
+            context = {"run_id": run_id, "recording_id": recording_id,
+                       "live_id": live_id, "segment_index": segment_index,
+                       "navigation_id": response.get("navigation_id"),
+                       "record_start_t": start_t,
+                       "observed_live_id": response.get("observed_live_id")}
+            events.extend(extract_product_events(response, context))
+            # Legacy detail-only timeline remains available for older payloads.
+            product = product_in(response, live_id)
+            if product and (legacy_current is None
+                            or product["itemId"] != legacy_current["itemId"]):
+                event_t = response.get("received_at", response.get("t", start_t))
+                try:
+                    event_sec = max(0.0, float(event_t) - start_t)
+                except (TypeError, ValueError):
+                    event_sec = None
+                if event_sec is not None:
+                    if legacy_current:
+                        legacy_timeline.append(dict(legacy_current,
+                                                    start_sec=round(legacy_start, 1),
+                                                    end_sec=round(event_sec, 1)))
+                    legacy_current, legacy_start = product, event_sec
+    if legacy_current:
+        legacy_timeline.append(dict(legacy_current, start_sec=round(legacy_start, 1),
+                                    end_sec=round(max(0.0, end_t - start_t), 1)))
+    intervals = product_intervals(events)
+    current_events = [event for event in events
+                      if event.get("attribution_status") == "matched"
+                      and event.get("item_role") in CURRENT_ROLES]
+    if current_events:
+        # Price evidence stays at event level in product_events.jsonl; an
+        # interval only proves the observed current-item boundaries.
+        timeline = [{"itemId": interval.get("item_id") or "",
+                     "name": interval.get("item_name") or "",
+                     "start_sec": interval["start_seconds"],
+                     "end_sec": interval["end_seconds"],
+                     "item_id": interval.get("item_id"),
+                     "item_name": interval.get("item_name"),
+                     "sku_id": interval.get("sku_id"),
+                     "basis": "product_event_interval"}
+                    for interval in intervals]
+    else:
+        timeline = legacy_timeline
+    return {
+        "captured_count": captured,
+        "journal_sha256": checksum.hexdigest(),
+        "digital_observation": collector.result(),
+        "product_events": events,
+        "product_intervals": intervals,
+        "product_timeline": timeline,
+        "product_event_summary": summarize_product_events(events, intervals),
+        "response_attribution_summary": {
+            "schema_version": 1, "total": captured, "by_status": status_counts,
+            "by_api": api_counts, "missing_status_count": missing_status,
+            "high_confidence": status_counts.get("matched", 0),
+            "policy": "only matched rows enter strict room statistics; raw rows stay in the journal",
+        },
+    }
+
+
+def _raw_json_lines(path):
+    """Yield validated JSON lines without retaining the journal in memory."""
+    with Path(path).open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                json.loads(line)
+                yield line
+
+
+def _write_research_artifacts(attempt_dir, *, quality, timing, evidence):
+    """Write small, citable artifacts next to the authoritative response journal."""
+    evidence = evidence or {"product_events": [], "product_intervals": []}
+    atomic_jsonl(Path(attempt_dir) / "product_events.jsonl", evidence.get("product_events", []))
+    atomic_jsonl(Path(attempt_dir) / "product_intervals.jsonl", evidence.get("product_intervals", []))
+    atomic_json(Path(attempt_dir) / "recording_quality.json", quality)
+    atomic_json(Path(attempt_dir) / "timing_evidence.json", timing)
+    return {"product_events": str(Path(attempt_dir) / "product_events.jsonl"),
+            "product_intervals": str(Path(attempt_dir) / "product_intervals.jsonl"),
+            "recording_quality": str(Path(attempt_dir) / "recording_quality.json"),
+            "timing_evidence": str(Path(attempt_dir) / "timing_evidence.json")}
+
+
 def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_name,
                    ffmpeg, ffprobe, max_minutes, user_agent, cookie_header,
                    state, lock, page, log, publish_status, run_id=None):
@@ -168,6 +280,13 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             if state["journal_error"] or scan_error:
                 state["journal"] = None
                 journal.close()
+                state["last_record_outcome"] = {
+                    "ok": False, "recording_id": recording_id,
+                    "failure_reason": "journal_write_error",
+                    "failure_stage": "journal_setup", "duration_seconds": None,
+                    "target_duration_met": None, "quality_state": "technically_invalid",
+                    "has_audio": None, "attempt_count": 0, "product_event_count": 0,
+                }
                 log("  扫描响应日志写入失败，本段不启动录制；原始日志保留")
                 publish_status("segment_failed", reason="扫描响应日志写入失败")
                 return False
@@ -180,6 +299,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
     first_data_t = None
     failure = None
     ffmpeg_attempts = []
+    record_events = []
     timeline = []
     last_sequence = 0
     current = None
@@ -201,6 +321,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                    "-rw_timeout", "10000000", "-headers", headers, "-i", stream_url,
                    "-c", "copy", "-t", str(max_minutes * 60), str(video)]
             start_t = time.time()
+            record_events.append({"kind": "ffmpeg_attempt_started", "attempt": attempt,
+                                  "wall_time": start_t})
             _save_attempt_diagnostic(attempt_dir, attempt, run_id=run_id, recording_id=recording_id,
                                      live_id=live_id, log_path=stderr_path, returncode=None,
                                      failure_stage="running")
@@ -218,6 +340,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                 ffmpeg_attempts.append({"attempt": attempt, "returncode": None,
                                         "failure_stage": failure_stage,
                                         "stderr_log": str(stderr_path.resolve())})
+                record_events.append({"kind": "ffmpeg_attempt_finished", "attempt": attempt,
+                                      "wall_time": time.time(), "returncode": None,
+                                      "failure_stage": failure_stage})
                 raise
             failure_stage = "connect_timeout"
             publish_status("connecting", live_id=live_id, segment_index=segment_index,
@@ -228,6 +353,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             while time.monotonic() < deadline and process.poll() is None:
                 if video.is_file() and video.stat().st_size > 1024:
                     first_data_t = time.time()
+                    record_events.append({"kind": "first_video_data", "attempt": attempt,
+                                          "wall_time": first_data_t,
+                                          "record_relative_seconds": round(first_data_t - start_t, 3)})
                     break
                 time.sleep(1)
             if first_data_t is None:
@@ -241,6 +369,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                 ffmpeg_attempts.append({"attempt": attempt, "returncode": returncode,
                                         "failure_stage": "connect_timeout",
                                         "stderr_log": str(stderr_path.resolve())})
+                record_events.append({"kind": "ffmpeg_attempt_finished", "attempt": attempt,
+                                      "wall_time": time.time(), "returncode": returncode,
+                                      "failure_stage": "connect_timeout"})
                 log(f"  接流尝试 {attempt} 未成功，文件保留")
                 continue
             log(f"  {seg_name} 开始录制，时长上限 {max_minutes} 分钟")
@@ -274,10 +405,15 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                         current = product
                         current_start = max(0.0, float(response.get("t", time.time())) - start_t)
                 if time.monotonic() >= next_refresh:
+                    requested_t = time.time()
                     try:
                         page.refresh()
-                    except Exception:
-                        pass
+                        record_events.append({"kind": "page_refresh", "wall_time": requested_t,
+                                              "record_relative_seconds": round(requested_t - start_t, 3)})
+                    except Exception as error:
+                        record_events.append({"kind": "page_refresh_failed", "wall_time": requested_t,
+                                              "record_relative_seconds": round(requested_t - start_t, 3),
+                                              "error": type(error).__name__})
                     next_refresh = time.monotonic() + options["page_refresh_seconds"]
                 if time.monotonic() >= next_checkpoint:
                     with lock:
@@ -302,6 +438,9 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             ffmpeg_attempts.append({"attempt": attempt, "returncode": returncode,
                                     "failure_stage": stage, "warning": warning,
                                     "stderr_log": str(stderr_path.resolve())})
+            record_events.append({"kind": "ffmpeg_attempt_finished", "attempt": attempt,
+                                  "wall_time": time.time(), "returncode": returncode,
+                                  "failure_stage": stage, "warning": warning})
             break
     except Exception as error:
         failure = type(error).__name__ + ": " + str(error)
@@ -334,45 +473,129 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                 if sink_lock:
                     sink_lock.release()
     end_t = time.time()
-    if current:
-        timeline.append(dict(current, start_sec=round(current_start, 1), end_sec=round(end_t - start_t, 1)))
+    validation = None
+    duration = None
+    evidence = None
+    quality = None
+    timing = None
+    artifacts = {}
+    final_path = attempt_dir / f"data_{ts}_final.json"
+    base = {"run_id": run_id, "recording_id": recording_id, "live_id": str(live_id),
+            "segment_index": segment_index, "live_url": url,
+            "record_start_t": start_t, "record_end_t": end_t,
+            "first_video_data_t": first_data_t, "max_minutes": max_minutes,
+            "ffmpeg_attempts": ffmpeg_attempts, "record_events": record_events}
     try:
         publish_status("validating", elapsed_seconds=round(end_t - start_t), remaining_seconds=0)
         if first_data_t is None or failure is not None or journal_error:
             raise ValueError(failure or "接流失败或响应日志写入失败")
-        validation = video_validation(video, {"max_minutes": max_minutes}, ffprobe, probe=probe_video)
+        validation = video_validation(video, {"max_minutes": max_minutes}, ffprobe,
+                                      probe=probe_video, media_probe=probe_media)
         duration = validation["duration_seconds"]
-        with journal_path.open(encoding="utf-8") as stream:
-            responses = [json.loads(line) for line in stream if line.strip()]
-        timeline = _timeline_from_responses(responses, live_id, start_t, end_t)
+        base.update(video_duration_seconds=duration, technical_validation=validation)
+        evidence = _journal_evidence(journal_path, live_id=live_id, run_id=run_id,
+                                     recording_id=recording_id, segment_index=segment_index,
+                                     start_t=start_t, end_t=end_t, media_duration=duration)
+        quality = recording_quality(base)
+        timing = timing_evidence(base, events=record_events)
+        artifacts = _write_research_artifacts(attempt_dir, quality=quality, timing=timing,
+                                              evidence=evidence)
         payload = {
-            "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
-            "live_url": url, "recorded_files": [str(video)],
-            "record_start_t": start_t, "record_end_t": end_t, "first_video_data_t": first_data_t,
-            "video_duration_seconds": duration, "timing_basis": "wall_clock_from_ffmpeg_launch",
-            "max_minutes": max_minutes, "product_timeline": timeline,
-            "captured_count": len(responses), "responses": responses,
-            "technical_validation": validation, "ffmpeg_attempts": ffmpeg_attempts,
+            **base,
+            "schema_version": 2,
+            "recorded_files": [str(video)],
+            "timing_basis": "wall_clock_from_ffmpeg_launch",
+            "product_timeline": evidence["product_timeline"],
+            "captured_count": evidence["captured_count"],
+            "responses_storage": "jsonl",
+            "responses_journal": str(journal_path),
+            "responses_journal_relative": journal_path.name,
+            "journal_sha256": evidence["journal_sha256"],
+            "responses_embedded": True,
+            "digital_observation": evidence["digital_observation"],
+            "response_attribution_summary": evidence["response_attribution_summary"],
+            "product_event_summary": evidence["product_event_summary"],
+            "product_events_journal": artifacts["product_events"],
+            "product_intervals_journal": artifacts["product_intervals"],
+            "recording_quality": quality,
+            "timing_evidence": timing,
         }
-        payload["digital_observation"] = digital_observation(payload, live_id)
-        atomic_json(attempt_dir / f"data_{ts}_final.json", payload)
-        publish_status("segment_completed", video_duration_seconds=duration)
+        atomic_json_with_raw_array(final_path, payload, "responses",
+                                   _raw_json_lines(journal_path))
+        publish_status("segment_completed", video_duration_seconds=duration,
+                       target_duration_met=quality["target_duration_met"],
+                       has_audio=quality["has_audio"], quality_state=quality["quality_state"])
+        state["last_record_outcome"] = {
+            "ok": True, "recording_id": recording_id, "failure_reason": None,
+            "failure_stage": None, "duration_seconds": duration,
+            "target_duration_met": quality["target_duration_met"],
+            "quality_state": quality["quality_state"], "has_audio": quality["has_audio"],
+            "attempt_count": len(ffmpeg_attempts),
+            "product_event_count": evidence["product_event_summary"]["event_count"],
+        }
         log(f"  ✅ {seg_name} 完成，ffprobe 时长 {duration:.1f} 秒；原始视频保留")
         return True
     except Exception as error:
+        failure_detail = str(error)
+        if failure:
+            failure_reason = str(failure)
+        elif "实际视频时长" in failure_detail:
+            failure_reason = "technical_validation_failed"
+        elif "接流失败或响应日志写入失败" in failure_detail:
+            failure_reason = "connect_or_journal_failure"
+        else:
+            failure_reason = type(error).__name__
+        if evidence is None and journal_path.is_file():
+            try:
+                evidence = _journal_evidence(journal_path, live_id=live_id, run_id=run_id,
+                                             recording_id=recording_id,
+                                             segment_index=segment_index,
+                                             start_t=start_t, end_t=end_t,
+                                             media_duration=duration)
+            except (OSError, ValueError, TypeError):
+                evidence = None
+        failed_base = dict(base, video_duration_seconds=duration,
+                           technical_validation=validation)
+        quality = recording_quality(failed_base)
+        media = validation.get("media") if isinstance(validation, dict) else None
+        timing = timing_evidence(failed_base, media=media, events=record_events)
         try:
-            with journal_path.open(encoding="utf-8") as stream:
-                failed_responses = [json.loads(line) for line in stream if line.strip()]
-        except (OSError, ValueError):
-            with lock:
-                failed_responses = list(state["collected"])
-        atomic_json(attempt_dir / "attempt_status.json", {
-            "run_id": run_id, "recording_id": recording_id, "segment_index": segment_index,
-            "valid": False, "error": str(error), "record_start_t": start_t, "record_end_t": end_t,
-            "ffmpeg_attempts": ffmpeg_attempts,
-            "digital_observation": digital_observation({"record_start_t": start_t,
-                "record_end_t": end_t, "responses": failed_responses}, live_id),
-        })
+            artifacts = _write_research_artifacts(attempt_dir, quality=quality, timing=timing,
+                                                  evidence=evidence)
+            artifact_error = None
+        except OSError as artifact_exception:
+            artifact_error = type(artifact_exception).__name__
+        status_payload = {
+            **failed_base,
+            "valid": False,
+            "error": failure_detail,
+            "failure_reason": failure_reason,
+            "recording_quality": quality,
+            "timing_evidence": timing,
+            "captured_count": evidence["captured_count"] if evidence else None,
+            "response_attribution_summary": (evidence["response_attribution_summary"]
+                                             if evidence else None),
+            "product_event_summary": (evidence["product_event_summary"]
+                                      if evidence else None),
+            "product_events_journal": artifacts.get("product_events"),
+            "product_intervals_journal": artifacts.get("product_intervals"),
+            "artifact_error": artifact_error,
+        }
+        try:
+            atomic_json(attempt_dir / "attempt_status.json", status_payload)
+        except OSError as write_error:
+            log(f"  attempt_status 写入失败: {type(write_error).__name__}")
+        state["last_record_outcome"] = {
+            "ok": False, "recording_id": recording_id,
+            "failure_reason": failure_reason, "failure_stage": failure_reason,
+            "duration_seconds": duration,
+            "target_duration_met": quality["target_duration_met"],
+            "quality_state": quality["quality_state"], "has_audio": quality["has_audio"],
+            "attempt_count": len(ffmpeg_attempts),
+            "product_event_count": (evidence["product_event_summary"]["event_count"]
+                                    if evidence else 0),
+            "error": failure_detail[:500],
+        }
         log(f"  本段未计入有效段，全部文件保留: {error}")
         publish_status("segment_failed", reason=str(error))
         return False

@@ -5,7 +5,7 @@
 - 每个实例读自己的 URL 文件、自己的端口、自己的输出目录
 - 随机抽 → 录20分 → 冷却2h → 每房间3轮
 """
-import os, sys, time, json, re, subprocess, threading, datetime, random
+import os, sys, time, json, re, subprocess, threading, datetime, random, uuid
 
 if len(sys.argv) < 3:
     print("用法: python taobao_run_edge.py <urls文件名> <端口> [启动延迟秒数]")
@@ -27,12 +27,15 @@ from src.utils.config import (
     MAX_MIN, MAX_ROUND, COOLDOWN_SEC, PRODUCT_MIN_SEC,
     MAX_COLLECTED, SEG_NAMES, USER_AGENT, MAX_ROUND_OVERRIDE, BATCH_ROOMS,
 )
+from src.utils.api_names import api_name
 from pathlib import Path
 from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
 from src.control.event_store import EventWriter
-from src.utils.segment_evidence import validation_matches
+from src.utils.segment_evidence import recording_quality, validation_matches
 from src.utils.runtime_options import read_runtime_options
-from src.crawler.response_attribution import attribution_status, detail_live_urls
+from src.crawler.response_attribution import (attribution_basis, attribution_status,
+                                               detail_live_urls, normalize_attribution_status)
+from src.crawler.attempt_log import CollectionAttemptWriter, classify_scan_result
 from src.crawler.retry_state import RetryState, RetryStateError
 from src.crawler.recovery import reconcile_room
 from src.utils.digital_flags import (
@@ -61,6 +64,10 @@ COMMAND_LOCK = os.environ.get("LIVE_COMMAND_LOCK")
 RECEIPT_DIR = os.environ.get("LIVE_OPERATION_RECEIPT_DIR")
 EVENT_DIR = os.environ.get("LIVE_EVENT_DIR")
 INSTANCE_ID = PORT - 9222
+_attempt_root = Path(STATUS_FILE).parent if STATUS_FILE else Path(OUTDIR)
+ATTEMPTS = CollectionAttemptWriter(
+    _attempt_root / f"collection_attempts_instance_{INSTANCE_ID}.jsonl",
+    run_id=RUN_ID, instance_id=INSTANCE_ID)
 try:
     EVENTS = EventWriter(EVENT_DIR, RUN_ID, f"worker_{INSTANCE_ID}", INSTANCE_ID) if EVENT_DIR else None
 except OSError:
@@ -348,15 +355,16 @@ def listen_loop():
             state["sequence"] += 1
             preview_truncated = bool(full_body is not None and len(full_body) > BODY_PREVIEW_CHARS)
             response = {"t": round(received_at, 1), "received_at": received_at, "url": url, "body": snippet,
+                        "source_api": api_name(url),
                         "response_sequence": state["sequence"], "body_truncated": preview_truncated,
                         "body_original_chars": len(full_body) if full_body is not None else None,
                         "live_ids": response_ids,
                         "navigation_id": navigation_id,
                         "observed_live_id": response_ids[0] if len(set(response_ids)) == 1 else None,
                         "attribution_status": status,
-                        "attribution_basis": ("response_live_id_match" if status == "matched"
-                                              else "receive_navigation_context_only" if navigation_id
-                                              else "no_live_id_evidence"),
+                        # Legacy readers expect "unscoped" for context-only rows.
+                        "attribution_status_legacy": ("unscoped" if status == "context_only" else status),
+                        "attribution_basis": attribution_basis(status, navigation_id),
                         "digital_flags": find_values_by_key(parsed, "isDigitalAnchorLive"),
                         "titles": (find_values_by_key(parsed, "liveTitle") or find_values_by_key(parsed, "title")),
                         "products": []}
@@ -595,6 +603,7 @@ def scan_room(url, live_id):
 
 def record_room(url, live_id, room_dir, surl, seg_name, segment_index):
     from src.crawler.recording import record_segment
+    state.pop("last_record_outcome", None)
     return record_segment(
         url=url, live_id=live_id, room_dir=room_dir, stream_url=surl,
         segment_index=segment_index, seg_name=seg_name, ffmpeg=FFMPEG,
@@ -619,6 +628,9 @@ def validation_receipt(room_dir, segment_index):
             if not video_path.is_relative_to(root) or not video_path.is_file():
                 continue
             final_stat, video_stat = final_path.stat(), video_path.stat()
+            quality = final.get("recording_quality")
+            if not isinstance(quality, dict):
+                quality = recording_quality(final)
             candidates.append({
                 "segment_index": int(segment_index), "recording_id": str(final["recording_id"]),
                 "final_json": str(final_path.resolve()), "final_size": final_stat.st_size,
@@ -628,6 +640,11 @@ def validation_receipt(room_dir, segment_index):
                 "validation_schema_version": 1,
                 "final_sha256": digest(final_path),
                 "video_sha256": final["technical_validation"]["video_sha256"],
+                "technical_valid": True,
+                "quality_state": quality.get("quality_state"),
+                "target_duration_met": quality.get("target_duration_met"),
+                "has_audio": quality.get("has_audio"),
+                "audio_duration_seconds": quality.get("audio_duration_seconds"),
             })
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             continue
@@ -982,17 +999,26 @@ while True:
     status_data["previous_room_id"] = previous_lid
     seg_name = SEG_NAMES[count] if count < len(SEG_NAMES) else f"第{count+1}段"
     log(f"\n🎯 {seg_name} room_{lid}")
+    attempt_id = uuid.uuid4().hex
+    attempt_start_t = time.time()
+    retry_at_start = retry_state.entry(lid).get("failure_count", 0)
     publish_status("scanning", live_id=lid, segment_index=count + 1,
                    planned_duration_seconds=MAX_MIN * 60, elapsed_seconds=0,
                    remaining_seconds=MAX_MIN * 60, reason="", last_scan_result="in_progress")
 
     # 扫码
     try: ok_scan = scan_room(url, lid)
-    except:
+    except Exception as scan_error:
         with capture_lock:
             state["scan_journal_path"] = None
         log("  扫码异常"); last_record[lid] = now
         entry = retry_state.failed(lid, "scan_exception")
+        ATTEMPTS.record(live_id=lid, stage="scan", decision="failed_scan",
+                        failure_reason="scan_exception", attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=entry["failure_count"], segment_index=count + 1,
+                        detail={"error": type(scan_error).__name__,
+                                "message": str(scan_error)[:300]})
         if entry["retry_exhausted"]:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
@@ -1001,10 +1027,21 @@ while True:
     if stop_requested():
         with capture_lock:
             state["scan_journal_path"] = None
+        ATTEMPTS.record(live_id=lid, stage="scan", decision="stopped",
+                        failure_reason="stop_requested", attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=retry_at_start, segment_index=count + 1)
         break
     if not ok_scan:
         log("  不可录"); last_record[lid] = now
         entry = retry_state.failed(lid, "scan_unavailable_or_filtered")
+        decision, reason = classify_scan_result(status_data.get("last_scan_result"))
+        ATTEMPTS.record(live_id=lid, stage="scan", decision=decision,
+                        failure_reason=reason, attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=entry["failure_count"], segment_index=count + 1,
+                        detail={"scan_result": status_data.get("last_scan_result"),
+                                "scan_reason": status_data.get("last_scan_reason")})
         if entry["retry_exhausted"]:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
@@ -1021,10 +1058,18 @@ while True:
     if stop_requested():
         with capture_lock:
             state["scan_journal_path"] = None
+        ATTEMPTS.record(live_id=lid, stage="scan", decision="stopped",
+                        failure_reason="stop_requested_after_scan", attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=retry_at_start, segment_index=count + 1)
         break
     if pause_requested(PAUSE_FILE):
         with capture_lock:
             state["scan_journal_path"] = None
+        ATTEMPTS.record(live_id=lid, stage="scan", decision="paused",
+                        failure_reason="pause_before_recording", attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=retry_at_start, segment_index=count + 1)
         continue
     room_dir = os.path.join(OUTDIR, f"room_{lid}")
     with capture_lock:
@@ -1036,13 +1081,31 @@ while True:
         log(f"  录制异常: {e}")
         last_record[lid] = time.time()
         entry = retry_state.failed(lid, type(e).__name__)
+        ATTEMPTS.record(live_id=lid, stage="recording", decision="failed_recording",
+                        failure_reason=type(e).__name__, attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=entry["failure_count"], segment_index=count + 1,
+                        detail={"message": str(e)[:300]})
         if entry["retry_exhausted"]:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
             _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
         continue
 
+    outcome = state.get("last_record_outcome") or {}
     if ok:
+        ATTEMPTS.record(live_id=lid, stage="recording", decision="recorded",
+                        failure_reason=None, attempt_id=attempt_id,
+                        attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
+                        retry_count=retry_at_start,
+                        recording_id=outcome.get("recording_id"),
+                        segment_index=count + 1,
+                        recording_duration_seconds=outcome.get("duration_seconds"),
+                        target_duration_met=outcome.get("target_duration_met"),
+                        quality_state=outcome.get("quality_state"),
+                        detail={"has_audio": outcome.get("has_audio"),
+                                "attempt_count": outcome.get("attempt_count"),
+                                "product_event_count": outcome.get("product_event_count")})
         new_count = count + 1
         mark_recorded(lid, new_count, total, room_dir)
         elapsed = time.time() - rec_start_t
@@ -1065,12 +1128,23 @@ while True:
         url_pool = read_urls()  # 重载
     else:
         log(f"  room_{lid} 录制失败")
+        entry = retry_state.failed(lid, "record_segment_failed")
+        ATTEMPTS.record(live_id=lid, stage="recording", decision="failed_recording",
+                        failure_reason=outcome.get("failure_reason") or "record_segment_failed",
+                        attempt_id=attempt_id, attempt_start_t=attempt_start_t,
+                        attempt_end_t=time.time(), retry_count=entry["failure_count"],
+                        recording_id=outcome.get("recording_id"), segment_index=count + 1,
+                        recording_duration_seconds=outcome.get("duration_seconds"),
+                        target_duration_met=outcome.get("target_duration_met"),
+                        quality_state=outcome.get("quality_state"),
+                        detail={"error": outcome.get("error"),
+                                "attempt_count": outcome.get("attempt_count"),
+                                "product_event_count": outcome.get("product_event_count")})
         if login_expired():
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
         last_record[lid] = now
         status_data["previous_room_id"] = str(lid)
-        entry = retry_state.failed(lid, "record_segment_failed")
         if entry["retry_exhausted"]:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))

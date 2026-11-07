@@ -29,7 +29,8 @@ from src.control.server import (Manager, handler_for, process_birth, verified_pr
                                 verified_progress_records, archived_segment_counts,
                                 archived_segment_records, compatible_existing_service)
 from src.utils.safe_io import atomic_json, verified_copy, PortLock, digest
-from src.utils.segment_evidence import video_validation, validation_matches
+from src.utils.segment_evidence import recording_quality, video_validation, validation_matches
+from src.crawler.attempt_log import classify_scan_result
 from src.crawler.recording import record_segment
 from src.crawler.runtime_control import apply_control_command, pause_requested, wait_while_paused
 from src.control.event_store import EventWriter, read_event_page
@@ -256,11 +257,19 @@ class Checks(unittest.TestCase):
                 if fail_final and str(path).endswith("_final.json"):
                     raise OSError("synthetic disk error")
                 atomic_json(path, data, **kwargs)
+            from src.crawler import recording as recording_module
+            real_stream_write = recording_module.atomic_json_with_raw_array
+            def write_stream(path, fields, key, items, **kwargs):
+                if fail_final and str(path).endswith("_final.json"):
+                    raise OSError("synthetic disk error")
+                return real_stream_write(path, fields, key, items, **kwargs)
             with patch("src.crawler.recording.subprocess.Popen", side_effect=launch), \
                     patch("src.crawler.recording.probe_video", return_value=600), \
                     patch("src.crawler.recording.stop_recorder"), \
                     patch("src.crawler.recording.time.sleep"), \
-                    patch("src.crawler.recording.atomic_json", side_effect=write):
+                    patch("src.crawler.recording.atomic_json", side_effect=write), \
+                    patch("src.crawler.recording.atomic_json_with_raw_array",
+                          side_effect=write_stream):
                 result = record_segment(url="https://test", live_id="123", room_dir=folder / str(fail_final),
                                       stream_url="synthetic://stream", segment_index=2, seg_name="第二段",
                                       ffmpeg="synthetic", ffprobe="synthetic", max_minutes=20, user_agent="test",
@@ -275,7 +284,28 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(list(folder.rglob("*.flv"))), 2)
         finals = list(folder.rglob("*_final.json"))
         self.assertEqual(len(finals), 1)
-        self.assertEqual(json.loads(finals[0].read_text(encoding="utf-8"))["run_id"], "synthetic-run")
+        final_payload = json.loads(finals[0].read_text(encoding="utf-8"))
+        self.assertEqual(final_payload["run_id"], "synthetic-run")
+        self.assertEqual(final_payload["schema_version"], 2)
+        self.assertEqual(final_payload["responses_storage"], "jsonl")
+        self.assertEqual(final_payload["captured_count"], 1)
+        self.assertEqual(final_payload["responses"][0]["response_sequence"], 1)
+        self.assertEqual(len(final_payload["journal_sha256"]), 64)
+        for name in ("recording_quality.json", "timing_evidence.json",
+                     "product_events.jsonl", "product_intervals.jsonl"):
+            self.assertTrue((finals[0].parent / name).is_file(), name)
+        quality = json.loads((finals[0].parent / "recording_quality.json").read_text(encoding="utf-8"))
+        self.assertTrue(quality["technical_valid"])
+        self.assertFalse(quality["target_duration_met"])
+        self.assertEqual(quality["target_duration_seconds"], 1200)
+        failed_status = list((folder / "True").rglob("attempt_status.json"))
+        self.assertEqual(len(failed_status), 1)
+        failed_payload = json.loads(failed_status[0].read_text(encoding="utf-8"))
+        self.assertFalse(failed_payload["valid"])
+        # Media was technically valid; the final JSON write failed. Failure
+        # reasons are kept separate from media validity.
+        self.assertTrue(failed_payload["recording_quality"]["technical_valid"])
+        self.assertIn("failure_reason", failed_payload)
 
     def test_23_event_disabled_vs_write_failure_same_media_validity_and_archive(self):
         folder = self.folder("event_archive_equivalence")
@@ -819,6 +849,7 @@ class Checks(unittest.TestCase):
                     return wait_while_paused(path, sleep=pause_sleep, **kwargs)
                 import random
                 retry_state = SimpleNamespace(eligible=lambda *args: (True, 0),
+                                              entry=lambda *args: {"failure_count": 0},
                                               succeeded=lambda *args: None,
                                               failed=lambda *args, **kwargs: {
                                                   "failure_count": 1, "retry_exhausted": False,
@@ -837,7 +868,9 @@ class Checks(unittest.TestCase):
                              "state": {"stream_url": {"url": "synthetic://stream"}, "scan_journal_path": None},
                              "capture_lock": threading.Lock(), "read_urls": lambda: rows,
                              "finalize_room": archive, "retry_state": retry_state,
-                             "status_data": {}, "_emit_worker_event": lambda *args, **kwargs: None}
+                             "status_data": {}, "_emit_worker_event": lambda *args, **kwargs: None,
+                             "uuid": uuid, "classify_scan_result": classify_scan_result,
+                             "ATTEMPTS": SimpleNamespace(record=lambda **kwargs: None)}
                 exec(compile(ast.Module(body=helper_nodes, type_ignores=[]),
                              "synthetic_finalize_helpers", "exec"), namespace)
                 exec(compile(ast.Module(body=[main_loop], type_ignores=[]), "synthetic_main_loop", "exec"), namespace)
@@ -980,7 +1013,9 @@ class Checks(unittest.TestCase):
         tree = ast.parse((ROOT / 'src' / 'crawler' / 'taobao_crawler.py').read_text(encoding='utf-8'))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                         and node.name == 'validation_receipt')
-        namespace = {'Path': Path, 'json': json, 'digest': digest, 'validation_matches': validation_matches}
+        namespace = {'Path': Path, 'json': json, 'digest': digest,
+                     'validation_matches': validation_matches,
+                     'recording_quality': recording_quality}
         exec(compile(ast.Module(body=[function], type_ignores=[]), 'synthetic_receipt_builder', 'exec'), namespace)
         receipt = namespace['validation_receipt'](room, 1)
         self.assertEqual(receipt['recording_id'], 'rec-123')
