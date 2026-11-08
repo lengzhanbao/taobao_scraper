@@ -361,6 +361,9 @@ python -m py_compile <本轮修改的 Python 文件>
   - `d4d6d5e4` — `feat: record product events, timing evidence and collection attempts`
   - `5b91e1ed` — `feat: export research artifacts and separate quality metrics in the panel`
   - `10b43506` — `fix: tighten media validation and expose raw platform identifiers`
+  - `d6da4650` — `feat: add recent collection attempts panel and room quality summaries`
+  - `07e86a46` — `fix: separate speaking and publish callbacks from the recording product timeline`
+  - `a2da362b` — `docs: record callback evidence rules, recent-attempts UX and read-only validation`
 - 本报告提交：见 `git log -1`。
 - 是否推送远程：**否**。
 - 工作区：提交后应为 clean（`git status --porcelain` 无输出）。
