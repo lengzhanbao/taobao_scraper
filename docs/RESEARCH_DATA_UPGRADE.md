@@ -50,8 +50,10 @@
 |---|---|---|
 | `data_<时间>_responses.jsonl` | 完整响应 journal，逐行 JSON；每条含完整正文、序号、接收时间、归属等级、来源 API | 已有，增加字段 |
 | `data_<时间>_final.json` | 最终 JSON；schema 2，`responses` 仍内嵌以兼容旧解析器，但采用流式写入 | 已有，schema 升级 |
-| `product_events.jsonl` | 商品观测事件（每条一个商品或一个商品结构） | 新增 |
-| `product_intervals.jsonl` | 仅在相邻当前商品观测之间推断的候选区间 | 新增 |
+| `product_events.jsonl` | 商品观测合并视图（每条一个商品或一个商品结构） | 新增 |
+| `product_events_strict.jsonl` | 仅 `matched` 的严格商品事件 | 新增 |
+| `product_events_candidate.jsonl` | 仅 `context_only` 的候选商品事件 | 新增 |
+| `product_intervals.jsonl` | 仅在相邻当前商品观测之间推断的候选区间；`is_continuity_observed=false` | 新增 |
 | `recording_quality.json` | 录制质量三分解摘要 | 新增 |
 | `timing_evidence.json` | 墙钟、媒体 PTS、接口时间及对齐状态 | 新增 |
 | `attempt_status.json` | 录制失败时的状态、质量、时间、商品事件摘要 | 已有，扩充 |
@@ -73,11 +75,14 @@
 | `video/*.flv` | 视频归档副本 |
 | `crawler/lives_summary_*.csv` | 段级汇总 CSV（新增研究字段追加在末尾） |
 | `crawler/comments_第N段_*.csv` | 弹幕 CSV，表头保持旧格式 |
-| `archive_manifest.json` | 归档凭据；新增 `analysis_files` 与 `analysis_summary` |
-| `product_events.jsonl` | 本房间所有段的商品事件合集，含 `recording_id` |
+| `archive_manifest.json` | 归档凭据；新增 `analysis_files`、`recording_analysis` 与 `analysis_summary` |
+| `product_events.jsonl` | 本房间所有段的商品事件合并视图，含 `recording_id` |
+| `product_events_strict.jsonl` | 本房间 `matched` 商品事件 |
+| `product_events_candidate.jsonl` | 本房间 `context_only` 商品候选事件 |
 | `product_intervals.jsonl` | 本房间所有段的商品候选区间 |
-| `recording_quality.json` | 本房间各段质量与汇总计数 |
-| `timing_evidence.json` | 本房间各段时间证据与汇总计数 |
+| `recording_quality.json` | 本房间各段质量与汇总计数，按 `recording_id` 索引 |
+| `timing_evidence.json` | 本房间各段时间证据与汇总计数，按 `recording_id` 索引 |
+| `recordings/<recording_id>/` | 逐录制分析目录：商品事件、区间、质量、时间、`manifest.json`（含 SHA256） |
 
 ### 2.3 采集尝试台账
 
@@ -244,7 +249,7 @@
 | `promotion_price` | `liveItemPrice.promotionPrice`（按分转换为元） |
 | `promotion_price_desc` | 如“入会价” |
 | `price_unit` | `CNY` 或空 |
-| `price_observations[]` | 每个价格字段一条：`role`、`raw_value`、`value`、`unit`、`unit_basis`、`evidence_path` |
+| `price_observations[]` | 每个价格字段一条：`role`、`raw_price`、`raw_value`、`normalized_price`、`value`、`unit`、`unit_basis`、`unit_certainty`、`conversion_rule`、`source_field_path`、`evidence_path` |
 | `attribution_status` | `matched` 或 `context_only`；冲突与未知不进入事件表 |
 | `evidence_path` | 如 `data.curItemList[0]` |
 | `raw_reference` | 如 `response:108` |
@@ -284,10 +289,17 @@
   "promotion_price_desc": "入会价",
   "price_unit": "CNY",
   "price_observations": [
-    {"role": "item_price", "raw_value": "239", "value": 239.0, "unit": "CNY",
-     "unit_basis": "item_price_as_yuan", "evidence_path": "data.curItemList[0].itemPrice"},
-    {"role": "promotion_price", "raw_value": "18327", "value": 183.27, "unit": "CNY",
-     "unit_basis": "live_item_price_in_cents",
+    {"role": "item_price", "raw_price": "239", "raw_value": "239",
+     "normalized_price": 239.0, "value": 239.0, "unit": "CNY",
+     "unit_basis": "item_price_as_yuan", "unit_certainty": "parser_convention",
+     "conversion_rule": "yuan_to_cny_1:1",
+     "source_field_path": "data.curItemList[0].itemPrice",
+     "evidence_path": "data.curItemList[0].itemPrice"},
+    {"role": "promotion_price", "raw_price": "18327", "raw_value": "18327",
+     "normalized_price": 183.27, "value": 183.27, "unit": "CNY",
+     "unit_basis": "live_item_price_in_cents", "unit_certainty": "api_field_convention",
+     "conversion_rule": "cents_to_cny_divide_100",
+     "source_field_path": "data.curItemList[0].liveItemPrice.promotionPrice",
      "evidence_path": "data.curItemList[0].liveItemPrice.promotionPrice", "desc": "入会价"}
   ],
   "attribution_status": "matched",
@@ -336,8 +348,17 @@
   "end_seconds": 300.0,
   "start_event_id": "rec-1:108:...:data.curItemList[0]:0",
   "end_event_id": "rec-1:120:...:data.curItemList[0]:0",
+  "start_evidence": {"source_api": "mtop.tblive.live.item.callback.query",
+                     "role_evidence": "callback_speaking_item_marker"},
+  "end_evidence": {"source_api": "mtop.tblive.live.item.callback.query",
+                   "role_evidence": "callback_speaking_item_marker"},
   "attribution_status": "matched",
   "basis": "consecutive_current_item_observations",
+  "interval_basis": "consecutive_current_item_observations",
+  "is_continuity_observed": false,
+  "continuity_observed": false,
+  "confidence": "inferred_boundary",
+  "limitation": "只由前后两个当前商品观测界定；区间内是否持续展示未被观测",
   "note": "区间由前后两次当前商品观测界定；不代表屏幕每一秒都已核验"
 }
 ```
@@ -346,7 +367,8 @@
 
 - 只有一次观测时不生成区间，不伪造持续时间；
 - 最后一个当前商品不会自动延伸到录制结束；
-- 区间是**推断候选**，不是平台原生事件，也不是“主播正在讲解”的证明。
+- `is_continuity_observed=false` 表示**区间内连续性没有被观测**；区间只是两个边界之间的推断候选；
+- 区间不是平台原生事件，也不是“主播正在讲解”的证明。
 
 ### 5.6 可支持的科研统计
 
@@ -360,7 +382,19 @@
 
 这些统计可以由 `product_events.jsonl` 直接计算。**本轮不生成口播与商品的匹配结论**；ASR 接入后应使用事件时间、商品 ID 与证据路径另行研究。
 
-### 5.7 平台身份字段
+### 5.7 严格集与候选集
+
+每次尝试和会话归档都提供三套互不覆盖的商品事件文件：
+
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `product_events.jsonl` | 合并视图，保留 `attribution_status` | 兼容旧流程、整体检索 |
+| `product_events_strict.jsonl` | 只有 `matched` | 严格科研统计，不混入上下文推断 |
+| `product_events_candidate.jsonl` | 只有 `context_only` | 扩展候选集，需单独标注归属不确定性 |
+
+`product_event_summary` 同时包含合并统计、`strict`、`candidate` 和 `event_sets` 计数。这样不会在“全部纳入”和“全部丢弃”之间二选一；候选集不得与严格集合并后冒充高可信统计。
+
+### 5.8 平台身份字段
 
 汇总 CSV 新增原始平台标识列：
 
@@ -522,7 +556,39 @@
 
 ---
 
-## 9. 与已有数据格式的兼容方式
+## 9. 归档闭环与逐录制分析
+
+### 9.1 每个 recording_id 一个分析目录
+
+```
+sessions/<直播标题_主播名_liveId>/recordings/<recording_id>/
+  product_events.jsonl
+  product_events_strict.jsonl
+  product_events_candidate.jsonl
+  product_intervals.jsonl
+  recording_quality.json
+  timing_evidence.json
+  manifest.json
+```
+
+`manifest.json` 记录 `recording_id`、`segment_index`、`run_id`、`live_id`，以及每个文件（包括 raw JSON 与 video 的引用）的 `bytes` 和 `sha256`。同一房间多个录制段不会因为共同归档而覆盖彼此。
+
+`archive_manifest.json` 新增 `recording_analysis` 列表，逐条记录 `recording_id`、段号和 `manifest.json` 凭据。
+
+### 9.2 归档核验
+
+`inspect_archive` 现在会：
+
+1. 校验每个段仍有 JSON、视频、弹幕、汇总的原始凭据；
+2. 若存在 `recording_analysis`，要求其录制标识集合与归档段完全一致，不允许缺失、重复或多余；
+3. 逐条校验分析 `manifest.json` 的 SHA256，以及其中引用的所有分析文件；
+4. 交叉核对分析清单中的 raw JSON / video 与归档段凭据一致；
+5. 校验 `recording_quality.json`、`timing_evidence.json` 的 `recording_id`；
+6. 校验商品事件/区间的 `recording_id`、`live_id`，以及 strict 文件只含 `matched`、candidate 文件只含 `context_only`。
+
+任何一项不通过，该段不会计入“完整归档段”；原始文件仍保留，不会自动删除。旧归档没有 `recording_analysis` 时保持兼容：若存在 `analysis_files` 则校验这些文件，否则按旧归档规则处理。
+
+## 10. 与已有数据格式的兼容方式
 
 | 旧格式/行为 | 2.8.0 处理 |
 |---|---|
@@ -539,25 +605,24 @@
 
 ---
 
-## 10. 当前限制
+## 11. 当前限制
 
-1. **未做真实淘宝长时端到端验证**：本轮只有离线/合成测试，不能把测试通过表述为真实采集已验证。
+1. **未做真实淘宝直播长时端到端验收**：已完成临时目录下的 1 分钟真实录制、质量/时间证据、归档与逐录制核验；但未做长时运行，且本次商品房间的录制窗口内没有触发商品 API，实时商品事件尚未在真实新录制中观察到。
 2. **商品角色是候选**：`current_candidate` 仍不是“主播正在讲解”的证明；`current_confirmed` 本轮不生成。
-3. **口播与商品未匹配**：没有 ASR 文本、语义模型或屏幕视觉证据的联合判断。
+3. **口播与商品匹配不在采集器范围**：没有 ASR、语义模型或屏幕视觉证据的联合判断；由用户自行处理。
 4. **价格角色覆盖有限**：仅覆盖实际观察到的 `itemPrice` 与 `liveItemPrice` 内若干字段；其他价格字段缺失时保持 null，不猜测。
 5. **SKU 未枚举**：只记录响应中出现的 SKU，不保证覆盖商品全部 SKU。
 6. **时间对齐是近似**：`delta` 未估计，`alignment_uncertainty_ms` 为 null；页面刷新和 FFmpeg 重连已保留为事件，但未做媒体级重建。
 7. **弹幕 `context_only` 未并入 CSV**：为保护历史口径，当前只在归属摘要中计数；如需新口径应单独导出。
-8. **归档派生文件未纳入 `inspect_archive` 的逐文件复核**：manifest 已记录其 SHA256，但现有归档完整性核验仍聚焦 JSON/视频/弹幕/汇总。
-9. **控制台质量计数依赖进度凭据**：只有归档清单的房间不会推断目标达成或音轨状态。
-10. **旧恢复路径不补写质量字段**：启动对账生成的凭据可能没有质量字段，控制台显示 unknown，而不是猜测。
-11. **旧 `店铺ID` 列仍保留回退逻辑**：新列 `平台shopId` / `平台accountId` 已分开保存，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
-12. **兼容期仍有磁盘重复**：完整响应在 journal 与最终 JSON 各存一份；本轮只优化了写入内存，尚未切换为“仅摘要 + journal 引用”。
-13. **采集与归档尚未解耦**：仍沿用既有 staging 批量归档队列，不是可独立重跑的采集/归档任务系统。
+8. **控制台质量计数依赖进度凭据**：只有归档清单的房间不会推断目标达成或音轨状态。
+9. **旧恢复路径不补写质量字段**：启动对账生成的凭据可能没有质量字段，控制台显示 unknown，而不是猜测。
+10. **旧 `店铺ID` 列仍保留回退逻辑**：新列 `平台shopId` / `平台accountId` 已分开保存，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
+11. **兼容期仍有磁盘重复**：完整响应在 journal 与最终 JSON 各存一份，逐录制分析目录也会重复保存小体积派生文件；尚未切换到“仅摘要 + journal 引用”。
+12. **采集与归档尚未解耦**：仍沿用既有 staging 批量归档队列，不是可独立重跑的采集/归档任务系统。
 
 ---
 
-## 11. 后续建议
+## 12. 后续建议
 
 1. **一次真实小规模验收**：按明确验收标准（扫描、接流、录制、final JSON、归档、商品事件、质量/时间文件）跑一次真实短时采集，并记录失败原因分布。
 2. **把 `context_only` 弹幕作为独立新口径导出**：新增文件而不是改旧 CSV，便于与历史统计对照；同时抽查商品事件与屏幕/人工标注。

@@ -44,8 +44,9 @@
 |---|---|---|
 | `recording_quality.json` | 每次 attempt 目录及 `sessions/<房间>/` | 技术有效性、目标时长达成、音轨/编码/分辨率/帧率；缺失事实为 `unknown`。 |
 | `timing_evidence.json` | 同上 | 墙钟、媒体 PTS、接口接收时间、FFmpeg 重连与页面刷新事件，以及近似/未解决的对齐状态。 |
-| `product_events.jsonl` | 同上 | 带商品 ID、SKU、价格角色与单位依据、来源 API、响应序号、归属等级的商品观测。 |
-| `product_intervals.jsonl` | 同上 | 仅在相邻“当前商品候选”观测之间推断的候选区间，不把单次观测伪造为持续时间。 |
+| `product_events.jsonl` / `product_events_strict.jsonl` / `product_events_candidate.jsonl` | 同上 | 商品观测合并视图、严格 `matched` 集、候选 `context_only` 集；两套统计互不覆盖。 |
+| `product_intervals.jsonl` | 同上 | 仅在相邻“当前商品候选”观测之间推断的候选区间；`is_continuity_observed=false`，不把单次观测伪造为持续时间。 |
+| `recordings/<recording_id>/` | `sessions/<房间>/` | 每个录制段独立的质量、时间、商品文件和 `manifest.json`（含 SHA256）；归档核验按 `recording_id` 闭环。 |
 | `collection_attempts_instance_<N>.jsonl` | 运行控制目录或独立模式的 staging | 记录未开播、非数字人、网络、验证码、接流、录制与核验失败原因，解释样本如何形成。 |
 
 **兼容边界：** 旧版最终 JSON 仍可解析；`technical_validation` 保持 schema 1；旧 `unscoped` 归属映射为 `context_only`；原始视频、JSONL、JSON、CSV 与日志不会被删除或改写。严格派生统计只接受 `matched` 响应，其余原始响应保留在 journal。

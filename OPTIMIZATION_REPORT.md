@@ -32,13 +32,14 @@
 |---|---|---|---|---|
 | 录制质量 | 只有技术有效/无效；20 分钟目标下 7 分钟视频也可通过技术核验，且没有独立的目标达成指标 | 技术有效性保持旧口径；新增目标时长、实际时长、达成率、90% 达成阈值，三者分开 | `src/utils/segment_evidence.py`、`src/crawler/recording.py`、`src/parser/parse_data.py` | 已完成 |
 | 音视频事实 | 只检查视频流与时长；不保证存在可用的音频流 | 新增 `has_audio`、音视频编码、音频时长、分辨率、帧率、首包 PTS；缺失为 `null` | `src/utils/safe_io.py`、`src/utils/segment_evidence.py` | 已完成 |
-| 商品数据 | 从最后一次 `item.callback.query` 的 `curItemList[0]` 或列表第一项取名称/价格 | 新增 `product_events.jsonl`：商品 ID、SKU、名称、角色、价格角色/单位依据、来源 API、响应序号、接收时间、归属等级、证据路径；不默认第一项为当前商品 | `src/parser/product_events.py`、`src/crawler/recording.py`、`src/parser/parse_data.py` | 已完成 |
-| 商品时间结构 | `product_timeline` 主要基于 `live.detail.get`；单次观测可能延伸到录制结束 | 新增 `product_intervals.jsonl`：只在两次当前商品候选观测之间生成区间；单次观测不生成区间 | `src/parser/product_events.py`、`src/crawler/recording.py` | 已完成 |
+| 商品数据 | 从最后一次 `item.callback.query` 的 `curItemList[0]` 或列表第一项取名称/价格 | 新增商品事件：严格集（`matched`）与候选集（`context_only`）分开输出，保留原始价格、标准化价格、换算规则和来源字段；不默认第一项为当前商品 | `src/parser/product_events.py`、`src/crawler/recording.py`、`src/parser/parse_data.py` | 已完成 |
+| 商品时间结构 | `product_timeline` 主要基于 `live.detail.get`；单次观测可能延伸到录制结束 | 新增 `product_intervals.jsonl`：只在两次当前商品候选观测之间生成区间；单次观测不生成区间；显式 `is_continuity_observed=false`，不把推断当连续展示 | `src/parser/product_events.py`、`src/crawler/recording.py` | 已完成 |
+| 价格单位 | `itemPrice` 直接当元、`promotionPrice` 直接除以 100，没有逐字段换算依据 | 每个价格观测保留 `raw_price`、`normalized_price`、`conversion_rule`、`source_field_path`、`unit_certainty`；无可靠规则时不转换 | `src/parser/product_events.py` | 已完成 |
 | 响应归属 | `matched` / `conflict` / `unscoped` / `unknown`；派生表可能接受 `unknown` | `matched` / `context_only` / `conflict` / `unknown`；旧 `unscoped` 读取时映射为 `context_only`；严格派生只接受 `matched` | `src/crawler/response_attribution.py`、`src/crawler/taobao_crawler.py`、`src/parser/parse_data.py` | 已完成 |
 | 时间对齐 | 有录制墙钟与 FFprobe 时长，但没有独立时间证据文件；没有区分媒体 PTS 与接口接收时间 | 新增 `timing_evidence.json`：墙钟、媒体 PTS、接口时间基准、页面刷新/FFmpeg 尝试事件、`approximate`/`unresolved` 与 `null` 不确定性 | `src/utils/segment_evidence.py`、`src/crawler/recording.py`、`src/parser/parse_data.py` | 已完成 |
 | 失败样本 | 日志有失败原因，但没有统一可分析台账 | 新增 `collection_attempts_instance_<N>.jsonl`，区分未开播/非数字人/网络/验证码/接流/录制/核验失败并关联 `recording_id` | `src/crawler/attempt_log.py`、`src/crawler/taobao_crawler.py` | 已完成 |
 | 内存/磁盘 | 最终 JSON 把 journal 全部读入 Python 列表后再 `json.dump`，峰值约为全部响应的对象内存 | 最终 JSON 仍内嵌 `responses`（兼容），但按 journal 逐行流式写入；新增 `responses_journal`、`captured_count`、`journal_sha256` | `src/utils/safe_io.py`、`src/crawler/recording.py` | 已完成（兼容模式） |
-| 归档输出 | 归档 manifest 只有 JSON/视频/弹幕/汇总 | 新增会话级商品事件、区间、质量、时间文件，并写入 `analysis_files` / `analysis_summary` | `src/parser/parse_data.py` | 已完成 |
+| 归档输出 | 归档 manifest 只有 JSON/视频/弹幕/汇总；分析文件未被 `inspect_archive` 核验 | 新增会话级商品事件/质量/时间文件；每个 `recording_id` 独立分析目录和 `manifest.json`；`inspect_archive` 逐文件核对 SHA256、录制标识、严格/候选状态，并拒绝索引缺失或篡改 | `src/parser/parse_data.py`、`src/utils/segment_evidence.py` | 已完成 |
 | 旧数字人工具 | `collect_digital.py` 仍把响应正文截断到 800,000 字符 | 保留完整正文并记录 `body_truncated=false` / `body_original_chars` | `src/detector/collect_digital.py` | 已完成 |
 | 平台身份 | `店铺ID` 在 shopId 缺失时回退 accountId，可能混用两种 ID | 保留旧列兼容，同时新增 `平台liveId`、`平台shopId`、`平台accountId`、`平台bizCode`，缺失留空 | `src/parser/parse_data.py` | 已完成 |
 | 控制台 | 只有技术有效、完整归档、数字人标记计数；失败原因只在日志里 | 增加目标时长达成段数、缺失音轨段数、最近采集尝试表和网址清单质量列；失败原因转为中文说明，不与技术有效段混算 | `src/control/server.py`、`src/control/web/*` | 已完成 |
@@ -99,10 +100,13 @@
 
 - 解析实际观察到的三个 API 结构；
 - 记录 `itemId`、`skuId`、`itemName`、价格角色与单位依据；
-- 同一响应多个当前项降级为 `unknown`；
+- 价格观测保留 `raw_price`、`normalized_price`、`conversion_rule`、`source_field_path`、`unit_certainty`；没有可靠换算规则时不做强制转换；
+- 同一响应多个当前项降级为 `unknown`；`publishitem` 回调不冒充当前商品；
 - 列表项只记 `listed`；
 - 商品观测保留来源 API、响应序号、接收时间、归属等级、证据路径；
-- 单次观测不生成持续时间，最后一项不延伸到录制结束。
+- 单次观测不生成持续时间，最后一项不延伸到录制结束；
+- 区间显式标记 `is_continuity_observed=false`，只表示两个观测边界，不表示持续展示；
+- 严格集 `product_events_strict.jsonl` 与候选集 `product_events_candidate.jsonl` 分开输出，合并视图保留兼容。
 
 ### 4.3 响应归属
 
@@ -144,6 +148,14 @@
 - 最终 JSON `responses` 仍内嵌，保持旧解析器兼容；
 - 写入时逐行复制 journal，避免同时持有全部响应对象；
 - 解析器支持 `responses` 缺失时回退 journal。
+
+### 4.9 归档闭环
+
+- 每个 `recording_id` 在 `sessions/<房间>/recordings/<recording_id>/` 下拥有独立分析目录与 `manifest.json`；
+- 目录内包含严格/候选商品事件、区间、质量、时间文件，并引用 raw JSON 与 video 的 SHA256；
+- `archive_manifest.json` 增加 `recording_analysis` 索引；
+- `inspect_archive` 校验索引完整性、每个文件 SHA256、raw/video 凭据一致性、质量/时间 `recording_id`、商品事件 `recording_id/live_id` 与严格/候选状态；
+- 索引缺失、重复、篡改或跨录制混入时，该段不计入“完整归档段”，原始文件仍保留。
 
 ---
 
@@ -189,7 +201,8 @@
   "product_event_summary": {
     "event_count": 17,
     "distinct_item_ids": 6,
-    "interval_count": 2
+    "interval_count": 2,
+    "event_sets": {"strict_event_count": 12, "candidate_event_count": 5}
   },
   "responses": [
     {"response_sequence": 1, "url": "...", "body": "...", "attribution_status": "matched"}
@@ -222,11 +235,17 @@
   "promotion_price_desc": "入会价",
   "price_unit": "CNY",
   "price_observations": [
-    {"role": "item_price", "raw_value": "239", "value": 239.0,
-     "unit_basis": "item_price_as_yuan",
+    {"role": "item_price", "raw_price": "239", "raw_value": "239",
+     "normalized_price": 239.0, "value": 239.0,
+     "unit_basis": "item_price_as_yuan", "unit_certainty": "parser_convention",
+     "conversion_rule": "yuan_to_cny_1:1",
+     "source_field_path": "data.curItemList[0].itemPrice",
      "evidence_path": "data.curItemList[0].itemPrice"},
-    {"role": "promotion_price", "raw_value": "18327", "value": 183.27,
-     "unit_basis": "live_item_price_in_cents",
+    {"role": "promotion_price", "raw_price": "18327", "raw_value": "18327",
+     "normalized_price": 183.27, "value": 183.27,
+     "unit_basis": "live_item_price_in_cents", "unit_certainty": "api_field_convention",
+     "conversion_rule": "cents_to_cny_divide_100",
+     "source_field_path": "data.curItemList[0].liveItemPrice.promotionPrice",
      "evidence_path": "data.curItemList[0].liveItemPrice.promotionPrice"}
   ],
   "attribution_status": "matched",
@@ -285,7 +304,7 @@ python -m pytest tests/ -q
 
 ```text
 python -m pytest tests/ -q
-116 passed, 3 subtests passed in 203.13s
+116 passed, 3 subtests passed in 293.13s
 ```
 
 新增 18 个测试，覆盖：
@@ -327,7 +346,29 @@ python -m py_compile <本轮修改的 Python 文件>
 - 用系统 FFprobe 实测一个 584MB 真实 FLV：`1260.0` 秒、`h264` + `aac`、`1080x1920`、`15fps`、首视频 PTS `0.0`、首音频 PTS `0.012`，耗时约 1.67 秒；源文件未改动。
 - 历史最终 JSON 多数没有 `max_minutes` 和媒体事实，因此 `target_duration_met` / `has_audio` 显示 unknown；这是“不猜测”的预期行为，新录制会写入完整事实。
 
-### 7.5 未执行的测试
+### 7.5 真实小样本运行（C）
+
+在临时数据目录、使用本机真实登录 Cookie、系统 FFmpeg/FFprobe 做了一次 1 分钟真实录制验收，不写入任何真实科研目录，也不回写 Cookie 文件。
+
+| 项目 | 结果 |
+|---|---|
+| 直播间 | 2297437410835067（李佳琦Austin，平台数字人标记 false） |
+| 录制 | 成功，FFprobe 60.167 秒 |
+| 质量 | `technical_valid=true`、`target_duration_met=true`、`has_audio=true` |
+| 媒体事实 | hevc + aac、1080×1920、15fps |
+| 响应 | 55 条；页面每 15 秒刷新后复跑一次，抓到 142 条 |
+| 商品事件 | 0 条；该 PC 直播页在录制窗口内没有调用已识别的商品 API |
+| 归档 | `process_room` 成功；`inspect_archive` 返回 1 个完整段、0 错误 |
+| 逐录制分析 | `recordings/<recording_id>/manifest.json` 存在，归档核验通过 |
+
+补充：
+
+- 另一个商品房间 1802969124705494 的真实流在 24.0 秒结束，被质量规则正确拒绝（目标 60 秒、最低 54 秒），文件和失败状态保留；
+- 商品房间 3028819781613441 录制 60.1 秒成功，抓到 118 条响应和 24 条弹幕，质量与归档核验通过，但同样没有在窗口内触发商品 API，商品事件为 0；
+- 这说明真实链路能完成“录制 → 质量/时间证据 → 最终 JSON → 会话归档 → 逐录制分析 → 归档核验”；但“新录制窗口内必然产生商品事件”尚未被证实。历史真实响应中已能稳定产生 1,847 条商品事件，说明提取逻辑本身可用；实时商品事件仍需要在有商品卡交互/切换的窗口内复验。
+- 时间证据记录到该样本墙钟窗口与媒体时长差约 `-6.259s`，再次说明不能用墙钟直接假设精确媒体对齐；`alignment_status=approximate`、`delta=null` 的处理是必要的。
+
+### 7.6 未执行的测试
 
 - 未运行真实淘宝直播长时间采集；
 - 未运行真实浏览器 + FFmpeg 的真实接流测试；
@@ -339,17 +380,16 @@ python -m py_compile <本轮修改的 Python 文件>
 
 按影响排序：
 
-1. **真实环境长时验收缺失**：目前只能证明离线行为；真实直播间可能暴露 FFmpeg 重连、页面刷新、接口字段变化等新问题。
+1. **真实环境长时验收仍缺失**：已完成临时目录下的 1 分钟真实录制、质量/时间证据、归档与逐录制核验，但未做长时运行；本次商品房间在录制窗口内没有触发商品 API，因此“新录制窗口必然产生商品事件”尚未验证。
 2. **商品与口播的匹配不在采集器范围内**：`product_events` 只提供可连接的时间与身份证据，不产生“主播说了哪件商品”的结论；ASR 与语义匹配由用户自行处理。
 3. **`current_candidate` 不是“正在讲解”**：回调的 speaking 标记仍可能滞后或误报；本版本不生成 `current_confirmed`。
 4. **时间对齐仍是近似**：没有估计 `delta`，没有用音视频指纹重建真实偏移。
 5. **弹幕 `context_only` 未并入旧 CSV**：这是有意的兼容选择，但会降低弹幕召回；后续应以新口径单独导出。
-6. **归档分析文件未纳入逐文件复核**：manifest 记录 SHA256，但 `inspect_archive` 仍只核验原四类文件。
-7. **价格与 SKU 覆盖有限**：只记录响应中出现的字段，不枚举全部 SKU，不推断未出现的原价。
-8. **恢复路径不补质量字段**：对账生成的进度凭据可能缺少质量字段，控制台显示 unknown。
-9. **旧 `店铺ID` 列仍可能混用 ID**：新列已拆分并保留原始值，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
-10. **兼容期仍有磁盘重复**：完整响应在 journal 与最终 JSON 各存一份；本轮只优化写入内存，未切换为“仅摘要 + journal 引用”。
-11. **采集与归档尚未解耦**：仍沿用既有 staging 批量归档队列，不是可独立重跑的采集/归档任务系统。
+6. **价格与 SKU 覆盖有限**：只记录响应中出现的字段，不枚举全部 SKU，不推断未出现的原价；价格换算规则是字段约定，不是平台逐次确认。
+7. **恢复路径不补质量字段**：对账生成的进度凭据可能缺少质量字段，控制台显示 unknown。
+8. **旧 `店铺ID` 列仍可能混用 ID**：新列已拆分并保留原始值，但继续使用旧列的历史脚本仍可能把 accountId 当作店铺 ID。
+9. **兼容期仍有磁盘重复**：完整响应在 journal 与最终 JSON 各存一份，逐录制分析目录也会重复保存小体积派生文件；尚未切换到“仅摘要 + journal 引用”。
+10. **采集与归档尚未解耦**：仍沿用既有 staging 批量归档队列，不是可独立重跑的采集/归档任务系统。
 
 ---
 
@@ -375,4 +415,4 @@ python -m py_compile <本轮修改的 Python 文件>
 
 1. **做一次有明确验收标准的真实小规模运行**：从扫描、接流、录制、final JSON、商品事件、质量/时间文件到归档，逐项核对；记录失败原因分布，不追求批量。
 2. **独立导出 `context_only` 弹幕并核对商品事件**：用新口径单独导出，与旧弹幕 CSV 对照；再抽查商品事件与屏幕/人工标注是否一致，不把候选当结论。
-3. **补齐归档派生文件核验**：让 `inspect_archive` 能核验 `analysis_files` 的 SHA256 与内容结构，并把质量/时间摘要纳入归档完整性判断。
+3. **为旧归档补只读索引报告**：列出缺少 `recording_analysis` 的房间，评估是否需要重建分析索引；不自动改旧数据。

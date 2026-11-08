@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 控制台新增“最近采集尝试”表：显示扫描/录制结果、失败原因中文说明、重试次数、录制段与目标达成状态；网址清单表增加质量列。
 - 商品回调角色判定结合请求上下文：请求为 `speakingitem` 且响应只有一个当前项时记为 `current_candidate`；`publishitem` 回调不再冒充当前商品。
 - 解析归档会校验商品事件的 `recording_id` / `live_id`，并排除录制开始前的扫描阶段事件，避免把扫描上下文写入录制段商品时间线。
+- 商品价格观测新增 `raw_price`、`normalized_price`、`conversion_rule`、`source_field_path`、`unit_certainty`；没有可靠换算规则时不强制转换。
+- 商品区间新增 `interval_basis`、`is_continuity_observed=false`、`continuity_observed=false`、`confidence`、起止观测证据和限制说明，明确区间只代表观测边界。
+- 新增严格/候选两套商品事件文件：`product_events_strict.jsonl`（仅 matched）与 `product_events_candidate.jsonl`（仅 context_only），合并视图继续保留。
+- 每个 `recording_id` 在 `sessions/<房间>/recordings/<recording_id>/` 拥有独立分析目录与 `manifest.json`；`archive_manifest.json` 增加 `recording_analysis` 索引。
+- `inspect_archive` 校验逐录制分析索引完整性、文件 SHA256、raw/video 凭据一致性、质量/时间 `recording_id`、商品事件归属及严格/候选状态；篡改或缺失时不计入完整归档段。
 
 ### Changed
 - 最终 JSON 升级到 schema 2：以响应 journal 为完整原文来源，`responses` 仍按兼容要求内嵌，但改为流式写入，避免终结阶段把全部响应重复加载进内存；同时记录 `responses_journal`、`captured_count`、`journal_sha256`。
