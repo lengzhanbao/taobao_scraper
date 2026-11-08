@@ -167,6 +167,65 @@ def test_product_events_keep_multiple_items_and_price_roles():
     assert latest_current_candidate(single)["item_id"] == "987654321"
 
 
+def test_callback_publish_item_is_not_a_current_item_candidate():
+    publish_item = item(itemExtData={"smallCardItemType": "publishItem"})
+    response = product_response("mtop.tblive.live.item.callback.query", [publish_item])
+    event = extract_product_events(response, CONTEXT)[0]
+    assert event["item_role"] == "unknown"
+    assert event["role_evidence"] == "callback_without_speaking_marker"
+
+
+def test_callback_request_can_supply_speaking_evidence_without_item_marker():
+    no_marker = item()
+    no_marker.pop("itemExtData")
+    plain = product_response("mtop.tblive.live.item.callback.query", [no_marker])
+    assert extract_product_events(plain, CONTEXT)[0]["item_role"] == "unknown"
+    requested = product_response("mtop.tblive.live.item.callback.query", [no_marker])
+    requested["url"] += "&data=%7B%22smallcarditemtype%22%3A%22speakingitem%22%7D"
+    event = extract_product_events(requested, CONTEXT)[0]
+    assert event["item_role"] == "current_candidate"
+    assert event["role_evidence"] == "callback_request_speaking_item"
+
+
+def test_product_artifacts_from_another_recording_are_not_merged(tmp_path):
+    event_path = tmp_path / "product_events.jsonl"
+    event_path.write_text(
+        "\n".join(json.dumps(row) for row in [
+            {"recording_id": "other", "live_id": LIVE_ID, "item_id": "1"},
+            {"recording_id": "rec-1", "live_id": LIVE_ID, "item_id": "2"},
+            {"recording_id": "rec-1", "live_id": "other-room", "item_id": "3"},
+            {"recording_id": "rec-1", "live_id": LIVE_ID, "item_id": "4"},
+        ]) + "\n", encoding="utf-8")
+    interval_path = tmp_path / "product_intervals.jsonl"
+    interval_path.write_text(
+        "\n".join(json.dumps(row) for row in [
+            {"recording_id": "other", "live_id": LIVE_ID, "item_id": "1"},
+            {"recording_id": "rec-1", "live_id": LIVE_ID, "item_id": "2"},
+        ]) + "\n", encoding="utf-8")
+    data = {"product_events_journal": str(event_path),
+            "product_intervals_journal": str(interval_path)}
+    events, intervals, summary = parse_data.segment_product_evidence(
+        data, LIVE_ID, "rec-1", 1, "run-1", [])
+    assert [event["item_id"] for event in events] == ["2", "4"]
+    assert [item["item_id"] for item in intervals] == ["2"]
+    assert summary["event_count"] == 2
+
+
+def test_scan_phase_product_events_do_not_enter_the_recording_timeline():
+    before = product_response("mtop.tblive.live.item.callback.query", [item("111")],
+                              sequence=1, received_at=990.0)
+    during = product_response("mtop.tblive.live.item.callback.query", [item("222")],
+                              sequence=2, received_at=1010.0)
+    data = {"record_start_t": 1000.0}
+    events, intervals, summary = parse_data.segment_product_evidence(
+        data, LIVE_ID, "rec-1", 1, "run-1", [before, during])
+    assert [event["item_id"] for event in events] == ["222"]
+    assert summary["event_count"] == 1
+    assert product_intervals([
+        {**event, "event_relative_seconds": -5.0, "attribution_status": "matched",
+         "item_role": "current_candidate"} for event in events]) == []
+
+
 def test_product_events_cover_listed_items_missing_ids_and_sources():
     listed = product_response(
         "mtop.tblive.live.item.getvideodetailitemlistwithpagination",
@@ -260,6 +319,34 @@ def test_console_counts_target_duration_and_audio_separately():
     assert summary["target_duration_not_met_segments"] == 1
     assert summary["audio_missing_segments"] == 1
     assert summary["quality_unknown_segments"] == 1
+
+
+def test_recent_attempts_are_sorted_and_humanized(tmp_path):
+    from src.control.server import read_recent_attempts
+    path = tmp_path / "collection_attempts_instance_1.jsonl"
+    rows = [
+        {"run_id": "run-1", "instance_id": 1, "live_id": "111", "stage": "scan",
+         "decision": "failed_scan", "failure_reason": "network_or_navigation_error",
+         "attempt_end_t": 100.0, "detail": {"error": "synthetic network"}},
+        {"run_id": "run-1", "instance_id": 1, "live_id": "222", "stage": "recording",
+         "decision": "recorded", "failure_reason": None, "attempt_end_t": 300.0,
+         "recording_id": "rec-2", "recording_duration_seconds": 600.0,
+         "target_duration_met": False, "detail": {"has_audio": True}},
+        {"run_id": "run-1", "instance_id": 1, "live_id": "333", "stage": "scan",
+         "decision": "skipped_not_eligible", "failure_reason": "platform_flag_false",
+         "attempt_end_t": 200.0, "detail": {}},
+    ]
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                    encoding="utf-8")
+    recent = read_recent_attempts([path], limit=2)
+    assert [row["live_id"] for row in recent] == ["222", "333"]
+    assert recent[0]["decision_text"] == "已录制"
+    assert recent[1]["decision_text"] == "按规则跳过"
+    assert recent[1]["reason_text"] == "平台标记 false，按样本规则跳过"
+    assert recent[0]["detail"] == {"has_audio": True}
+    full = read_recent_attempts([path], limit=20)
+    assert full[2]["reason_text"] == "网络或页面导航失败"
+    assert full[2]["detail"]["error"] == "synthetic network"
 
 
 def test_collection_attempt_writer_writes_ledger(tmp_path):

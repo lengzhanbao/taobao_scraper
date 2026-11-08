@@ -160,7 +160,13 @@ def _journal_evidence(path, *, live_id, run_id, recording_id, segment_index, sta
                        "navigation_id": response.get("navigation_id"),
                        "record_start_t": start_t,
                        "observed_live_id": response.get("observed_live_id")}
-            events.extend(extract_product_events(response, context))
+            for event in extract_product_events(response, context):
+                relative = event.get("event_relative_seconds")
+                if relative is not None and relative < 0:
+                    # Scan-phase context stays in the journal, but not in the
+                    # recording segment's product timeline.
+                    continue
+                events.append(event)
             # Legacy detail-only timeline remains available for older payloads.
             product = product_in(response, live_id)
             if product and (legacy_current is None
@@ -541,6 +547,10 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             failure_reason = str(failure)
         elif "实际视频时长" in failure_detail:
             failure_reason = "technical_validation_failed"
+        elif first_data_t is None:
+            failure_reason = "connect_timeout"
+        elif journal_error:
+            failure_reason = "journal_write_error"
         elif "接流失败或响应日志写入失败" in failure_detail:
             failure_reason = "connect_or_journal_failure"
         else:

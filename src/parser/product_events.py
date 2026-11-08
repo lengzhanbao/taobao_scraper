@@ -12,6 +12,7 @@ Only structures actually observed in captured responses are parsed:
   -> ``data.itemListv1[].liveItemDO``
 """
 import json
+from urllib.parse import unquote
 
 from src.crawler.response_attribution import (attribution_basis, attribution_status,
                                                is_high_confidence_status,
@@ -198,6 +199,9 @@ def extract_product_events(response, context):
         # silently assigned to the current room.
         return []
     events = []
+    request_text = unquote(str(response.get("url", ""))).lower()
+    request_speaking = ("smallcarditemtype" in request_text
+                        and "speakingitem" in request_text)
     for base_path, base_role, role_evidence, items in product_item_lists(api, parsed):
         unique_current = len(items) == 1
         for index, item in enumerate(items):
@@ -206,7 +210,10 @@ def extract_product_events(response, context):
                 marker = str(((item.get("itemExtData") or {})
                               .get("smallCardItemType") or "")).lower()
                 if "speak" not in marker:
-                    role, evidence = "unknown", "callback_without_speaking_marker"
+                    if unique_current and request_speaking:
+                        role, evidence = "current_candidate", "callback_request_speaking_item"
+                    else:
+                        role, evidence = "unknown", "callback_without_speaking_marker"
             if role == "current_candidate" and not unique_current:
                 # Several current-item entries in one response are not a unique
                 # "what is on screen now" observation.
@@ -232,7 +239,8 @@ def product_intervals(events):
     usable = [event for event in events
               if event.get("attribution_status") == "matched"
               and event.get("item_role") in CURRENT_ROLES
-              and event.get("event_relative_seconds") is not None]
+              and type(event.get("event_relative_seconds")) in (int, float)
+              and event.get("event_relative_seconds") >= 0]
     usable.sort(key=lambda item: (item.get("event_relative_seconds"),
                                   item.get("response_sequence") or 0))
     intervals = []
@@ -336,5 +344,11 @@ def latest_current_candidate(events):
                   and event.get("item_role") in CURRENT_ROLES]
     if not candidates:
         return None
-    return max(candidates, key=lambda item: (item.get("response_sequence") or 0,
-                                             item.get("received_at") or 0))
+
+    def order(event):
+        sequence = event.get("response_sequence")
+        received = event.get("received_at")
+        return (sequence if type(sequence) in (int, float) else 0,
+                received if type(received) in (int, float) else 0)
+
+    return max(candidates, key=order)

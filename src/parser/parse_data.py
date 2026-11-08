@@ -228,6 +228,15 @@ def segment_product_evidence(data, live_id, recording_id, segment_index, run_id,
         events = []
         for response in responses:
             events.extend(extract_product_events(response, context))
+    else:
+        # Never merge a mismatched artifact into this room/recording.
+        events = [event for event in events
+                  if (event.get("recording_id") is None
+                      or str(event.get("recording_id")) == str(recording_id))
+                  and (event.get("live_id") is None
+                       or str(event.get("live_id")) == str(live_id))]
+    events = [event for event in events
+              if nonnegative_time(event.get("event_relative_seconds"))]
     interval_path = data.get("product_intervals_journal")
     if interval_path and Path(interval_path).is_file():
         try:
@@ -236,10 +245,22 @@ def segment_product_evidence(data, live_id, recording_id, segment_index, run_id,
             intervals = None
     if intervals is None:
         intervals = product_intervals(events)
+    else:
+        intervals = [item for item in intervals
+                     if (item.get("recording_id") is None
+                         or str(item.get("recording_id")) == str(recording_id))
+                     and (item.get("live_id") is None
+                          or str(item.get("live_id")) == str(live_id))
+                     and nonnegative_time(item.get("start_seconds"))]
     summary = data.get("product_event_summary")
     if not isinstance(summary, dict) or summary.get("schema_version") != 1:
         summary = summarize_product_events(events, intervals)
     return events, intervals, summary
+
+
+def nonnegative_time(value):
+    """Keep absent timestamps, drop negative or malformed ones."""
+    return value is None or (type(value) in (int, float) and value >= 0)
 
 
 def yn(value):
