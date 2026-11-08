@@ -409,6 +409,8 @@ python -m py_compile <本轮修改的 Python 文件>
   - `a2da362b` — `docs: record callback evidence rules, recent-attempts UX and read-only validation`
   - `97abc479` — `feat: make product evidence and archive linkage verifiable`
   - `b180f0bf` — `docs: document product evidence provenance and per-recording archive closure`
+  - `ad15319b` — `fix: skip ineligible rooms without consuming the failure budget`
+  - `ac19dd29` — `docs: record ineligible-room skip behavior and final test counts`
 - 本报告提交：见 `git log -1`。
 - 是否推送远程：**否**。
 - 工作区：提交后应为 clean（`git status --porcelain` 无输出）。
