@@ -217,7 +217,7 @@
 
 | API | 结构 | 商品角色 |
 |---|---|---|
-| `mtop.tblive.live.item.callback.query` | `data.curItemList[]` | 满足 `itemExtData.smallCardItemType` 含 `speak` 且该响应只有一个当前项时，记 `current_candidate`；否则 `unknown` |
+| `mtop.tblive.live.item.callback.query` | `data.curItemList[]` | 满足 `itemExtData.smallCardItemType` 含 `speak`，或请求参数为 `smallcarditemtype=speakingitem`，且该响应只有一个当前项时，记 `current_candidate`；`publishitem` 或其他情况记 `unknown` |
 | `mtop.roomstudio.live.detail.get` | `data.curItemList[]` | 只有一个当前项时记 `current_candidate`（`detail_cur_item_list`） |
 | `mtop.tblive.live.item.getvideodetailitemlistwithpagination` | `data.itemListv1[].liveItemDO` | `listed` |
 
@@ -306,10 +306,13 @@
 规则：
 
 1. 不把 `curItemList[0]` 自动当成当前讲解商品；
-2. 同一响应出现多个当前项时，全部降级为 `unknown`，避免制造“唯一当前商品”；
-3. `videodetail` 列表项只记 `listed`，不使用列表第一项填充“当前商品名称/价格”；
-4. 旧版最终 JSON 若完全没有可识别商品结构，才保留旧提取逻辑作为兼容兜底；
-5. 同一商品在不同时间重复出现时，保留为多条观测，不合并不同时间的价格与出现位置。
+2. 商品回调先看请求/响应中的 `speakingitem` 证据；真实历史响应中存在 `publishitem` 回调，这类响应只记为 `unknown`，不冒充当前讲解商品；
+3. 同一响应出现多个当前项时，全部降级为 `unknown`，避免制造“唯一当前商品”；
+4. `videodetail` 列表项只记 `listed`，不使用列表第一项填充“当前商品名称/价格”；
+5. 旧版最终 JSON 若完全没有可识别商品结构，才保留旧提取逻辑作为兼容兜底；
+6. 同一商品在不同时间重复出现时，保留为多条观测，不合并不同时间的价格与出现位置。
+
+扫描阶段会先复制扫描 journal 到录制 journal，用于房间上下文和流地址。扫描阶段发生的商品响应仍保留在原始 `responses` 中，但 `product_events.jsonl` 只收录录制开始后（`event_relative_seconds >= 0`）的观测；解析归档时也会再次校验商品事件的 `recording_id` 与 `live_id`，避免把其他房间或扫描上下文的商品当成本录制段证据。
 
 ### 5.5 商品区间
 
@@ -474,6 +477,8 @@
 
 这张表用于解释**科研样本如何形成**，不能替代原始响应与媒体证据。
 
+控制台新增“最近采集尝试”表，读取该台账并显示最近 20 条：时间、实例、直播 ID、扫描/录制阶段、结果、中文失败原因、重试次数、录制段和目标达成状态。它用于快速判断“房间不符合条件”与“采集/网络失败”的区别；原始数据仍在 staging 与 journal 中。
+
 ---
 
 ## 8. 内存与磁盘
@@ -555,7 +560,7 @@
 ## 11. 后续建议
 
 1. **一次真实小规模验收**：按明确验收标准（扫描、接流、录制、final JSON、归档、商品事件、质量/时间文件）跑一次真实短时采集，并记录失败原因分布。
-2. **把 `context_only` 弹幕作为独立新口径导出**：新增文件而不是改旧 CSV，便于与历史统计对照。
-3. **ASR 接入后做时间关联**：用 `product_events.jsonl` 的 `received_at`、`event_relative_seconds` 与 `timing_evidence.json` 的近似映射连接转写文本；明确报告不确定性。
+2. **把 `context_only` 弹幕作为独立新口径导出**：新增文件而不是改旧 CSV，便于与历史统计对照；同时抽查商品事件与屏幕/人工标注。
+3. **建立用户侧时间关联接口**：`product_events.jsonl` 已提供 `received_at`、`event_relative_seconds`，`timing_evidence.json` 已提供近似映射；ASR 与语义匹配由用户自行处理，采集器不声称已完成口播关联。
 
 以上建议尚未实现，不应在论文中描述为已完成能力。

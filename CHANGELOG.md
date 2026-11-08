@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 采集尝试台账 `collection_attempts_instance_<N>.jsonl`：区分未开播/非数字人/网络/验证码/接流/录制/核验失败，并关联 `recording_id`。
 - 会话归档新增 `sessions/<房间>/product_events.jsonl`、`product_intervals.jsonl`、`recording_quality.json`、`timing_evidence.json`，并写入 `archive_manifest.json` 的 `analysis_files` 与 `analysis_summary`。
 - 控制台分别显示目标时长达成段数与缺失音轨段数，不与技术有效段数混算。
+- 控制台新增“最近采集尝试”表：显示扫描/录制结果、失败原因中文说明、重试次数、录制段与目标达成状态；网址清单表增加质量列。
+- 商品回调角色判定结合请求上下文：请求为 `speakingitem` 且响应只有一个当前项时记为 `current_candidate`；`publishitem` 回调不再冒充当前商品。
+- 解析归档会校验商品事件的 `recording_id` / `live_id`，并排除录制开始前的扫描阶段事件，避免把扫描上下文写入录制段商品时间线。
 
 ### Changed
 - 最终 JSON 升级到 schema 2：以响应 journal 为完整原文来源，`responses` 仍按兼容要求内嵌，但改为流式写入，避免终结阶段把全部响应重复加载进内存；同时记录 `responses_journal`、`captured_count`、`journal_sha256`。

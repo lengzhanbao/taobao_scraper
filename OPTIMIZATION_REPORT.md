@@ -22,7 +22,7 @@
 5. 把失败尝试也变成可分析的样本形成记录；
 6. 在不破坏旧 JSON 和原始数据的前提下降低最终写入的峰值内存。
 
-未完成：商品与真实口播/ASR 的语义匹配、`current_confirmed` 判定、真实长时端到端验收、数据库化。
+本轮不包含：商品与真实口播/ASR 的语义匹配（由用户自行处理）、`current_confirmed` 判定、真实长时端到端验收、数据库化。
 
 ---
 
@@ -41,7 +41,8 @@
 | 归档输出 | 归档 manifest 只有 JSON/视频/弹幕/汇总 | 新增会话级商品事件、区间、质量、时间文件，并写入 `analysis_files` / `analysis_summary` | `src/parser/parse_data.py` | 已完成 |
 | 旧数字人工具 | `collect_digital.py` 仍把响应正文截断到 800,000 字符 | 保留完整正文并记录 `body_truncated=false` / `body_original_chars` | `src/detector/collect_digital.py` | 已完成 |
 | 平台身份 | `店铺ID` 在 shopId 缺失时回退 accountId，可能混用两种 ID | 保留旧列兼容，同时新增 `平台liveId`、`平台shopId`、`平台accountId`、`平台bizCode`，缺失留空 | `src/parser/parse_data.py` | 已完成 |
-| 控制台 | 只有技术有效、完整归档、数字人标记计数 | 增加目标时长达成段数、缺失音轨段数；不与技术有效段混算 | `src/control/server.py`、`src/control/web/*` | 已完成 |
+| 控制台 | 只有技术有效、完整归档、数字人标记计数；失败原因只在日志里 | 增加目标时长达成段数、缺失音轨段数、最近采集尝试表和网址清单质量列；失败原因转为中文说明，不与技术有效段混算 | `src/control/server.py`、`src/control/web/*` | 已完成 |
+| 商品回调判定 | 把最后一次回调的 `curItemList[0]` 当当前商品，`publishitem` 回调也可能被误当作当前讲解商品 | 结合请求 `speakingitem`/响应标记及当前项数量判定；`publishitem` 只记 `unknown`；扫描阶段事件不进入录制段商品时间线 | `src/parser/product_events.py`、`src/parser/parse_data.py`、`src/crawler/recording.py` | 已完成 |
 | 旧格式兼容 | 无统一兼容说明 | 旧最终 JSON 可解析；`technical_validation` 仍 schema 1；旧 `unscoped` 可读；差异派生文件先备份 | 多个文件 | 已完成 |
 
 ---
@@ -81,7 +82,7 @@
 | `tests/test_core.py` | 归属判断期望改为 `context_only`；为 AST 抽取的监听函数补充新依赖 |
 | `tests/test_capture_runtime.py` | 同上，并补充无导航上下文时为 `unknown` |
 | `tests/test_control_simulation.py` | 录制成功/失败测试增加流式最终 JSON、研究文件与失败状态断言；AST 命名空间补充台账/质量/API 依赖 |
-| `tests/test_research_upgrade.py` | 新增 13 个测试，覆盖本轮新增行为 |
+| `tests/test_research_upgrade.py` | 新增 18 个测试，覆盖本轮新增行为 |
 
 ---
 
@@ -129,7 +130,15 @@
 - 旧 `店铺ID` 列保留原回退逻辑，仅用于历史兼容；
 - 不自动合并不同 `liveId` 为 `room_group`。
 
-### 4.7 内存优化
+### 4.7 使用体验
+
+- 控制台新增“最近采集尝试”表：按时间显示实例、直播 ID、扫描/录制阶段、结果、失败原因、重试次数、录制段和目标达成状态；
+- 失败原因从内部代码转为中文说明，例如 `platform_flag_false`、`network_or_navigation_error`、`connect_timeout`、`stream_stalled`、`technical_validation_failed`；
+- 网址清单表新增“质量”列，按房间显示目标达成与缺失音轨计数；
+- 实例表在有效进度下方增加目标达成/未达成/缺音轨/目标未知计数；
+- 最近尝试只读文件尾部 256KB 并缓存 10 秒，长时间运行不会每次刷新都重读全部台账。
+
+### 4.8 内存优化
 
 - journal 仍是完整原文来源；
 - 最终 JSON `responses` 仍内嵌，保持旧解析器兼容；
@@ -276,10 +285,10 @@ python -m pytest tests/ -q
 
 ```text
 python -m pytest tests/ -q
-111 passed, 3 subtests passed in 87.32s
+116 passed, 3 subtests passed in 203.13s
 ```
 
-新增 13 个测试，覆盖：
+新增 18 个测试，覆盖：
 
 - 20 分钟收益下的目标达成率与 7 分钟“技术有效但目标未达成”；
 - 无音轨与媒体事实 unknown；
@@ -307,11 +316,22 @@ python -m py_compile <本轮修改的 Python 文件>
 （通过）
 ```
 
-### 7.4 未执行的测试
+### 7.4 真实历史响应的只读抽样验证
+
+为避免只依赖合成数据，本轮还对本地已有历史采集结果做了一次**只读**抽样核对（不写入、不重新归档、不启动浏览器）：
+
+- 抽取 120 个已有 `*_final.json`（小于 5MB），解析 1,352 条商品相关响应，生成 1,847 条商品事件，0 个解析异常；
+- 事件全部带有明确归属；其中 `current_candidate` 983 条、`listed` 550 条、`unknown` 314 条；
+- 86 个文件存在旧逻辑“最后一次回调第一项”；与新的 `current_candidate` 比较：62 个商品 ID 相同，24 个不同。
+- 抽查一个差异文件时发现其回调请求参数为 `smallcarditemtype":"publishitem"`，不是 `speakingitem`；旧逻辑可能把发布列表项当成当前商品，新逻辑将其记为 `unknown`，并优先采用 `live.detail.get` 的 `curItemList` 当前项。这验证了“不默认回调第一项”的必要性，也说明新旧商品字段不能直接互换。
+- 用系统 FFprobe 实测一个 584MB 真实 FLV：`1260.0` 秒、`h264` + `aac`、`1080x1920`、`15fps`、首视频 PTS `0.0`、首音频 PTS `0.012`，耗时约 1.67 秒；源文件未改动。
+- 历史最终 JSON 多数没有 `max_minutes` 和媒体事实，因此 `target_duration_met` / `has_audio` 显示 unknown；这是“不猜测”的预期行为，新录制会写入完整事实。
+
+### 7.5 未执行的测试
 
 - 未运行真实淘宝直播长时间采集；
 - 未运行真实浏览器 + FFmpeg 的真实接流测试；
-- 未进行真实 ASR 与商品口播匹配（本轮明确不做）。
+- 未进行真实 ASR 与商品口播匹配（用户自行处理，本轮不涉及）。
 
 ---
 
@@ -320,7 +340,7 @@ python -m py_compile <本轮修改的 Python 文件>
 按影响排序：
 
 1. **真实环境长时验收缺失**：目前只能证明离线行为；真实直播间可能暴露 FFmpeg 重连、页面刷新、接口字段变化等新问题。
-2. **商品与口播仍未关联**：`product_events` 只提供可连接的时间与身份证据，不产生“主播说了哪件商品”的结论。
+2. **商品与口播的匹配不在采集器范围内**：`product_events` 只提供可连接的时间与身份证据，不产生“主播说了哪件商品”的结论；ASR 与语义匹配由用户自行处理。
 3. **`current_candidate` 不是“正在讲解”**：回调的 speaking 标记仍可能滞后或误报；本版本不生成 `current_confirmed`。
 4. **时间对齐仍是近似**：没有估计 `delta`，没有用音视频指纹重建真实偏移。
 5. **弹幕 `context_only` 未并入旧 CSV**：这是有意的兼容选择，但会降低弹幕召回；后续应以新口径单独导出。
@@ -351,5 +371,5 @@ python -m py_compile <本轮修改的 Python 文件>
 ## 10. 下一步最值得做的三件事
 
 1. **做一次有明确验收标准的真实小规模运行**：从扫描、接流、录制、final JSON、商品事件、质量/时间文件到归档，逐项核对；记录失败原因分布，不追求批量。
-2. **把 `context_only` 弹幕与新时间证据接入 ASR**：先做独立导出与新口径对照，确认时间映射误差，再讨论商品与口播关联。
+2. **独立导出 `context_only` 弹幕并核对商品事件**：用新口径单独导出，与旧弹幕 CSV 对照；再抽查商品事件与屏幕/人工标注是否一致，不把候选当结论。
 3. **补齐归档派生文件核验**：让 `inspect_archive` 能核验 `analysis_files` 的 SHA256 与内容结构，并把质量/时间摘要纳入归档完整性判断。
