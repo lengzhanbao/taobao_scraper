@@ -1034,8 +1034,14 @@ while True:
         break
     if not ok_scan:
         log("  不可录"); last_record[lid] = now
-        entry = retry_state.failed(lid, "scan_unavailable_or_filtered")
         decision, reason = classify_scan_result(status_data.get("last_scan_result"))
+        if decision == "skipped_not_eligible":
+            # A non-digital or missing-flag room is not a retryable failure.
+            # Give it the normal cooldown without consuming the failure budget.
+            entry = retry_state.skipped(lid, reason)
+            log(f"  {reason}，按规则跳过并进入冷却")
+        else:
+            entry = retry_state.failed(lid, "scan_unavailable_or_filtered")
         ATTEMPTS.record(live_id=lid, stage="scan", decision=decision,
                         failure_reason=reason, attempt_id=attempt_id,
                         attempt_start_t=attempt_start_t, attempt_end_t=time.time(),
@@ -1046,10 +1052,12 @@ while True:
             status_data["retry_exhausted_rooms"] = list(dict.fromkeys(
                 status_data.get("retry_exhausted_rooms", []) + [lid]))
             _emit_worker_event("retry_exhausted", details={"failure_count": entry["failure_count"]})
-        publish_status("waiting", reason=status_data.get("reason") or "未取得目标直播流或未通过数字人筛选",
+        publish_status("waiting",
+                       reason=(reason if decision == "skipped_not_eligible"
+                               else status_data.get("reason") or "未取得目标直播流或未通过数字人筛选"),
                        next_retry_t=entry["last_failure_t"] + retry_state.cooldown_seconds,
                        retry_exhausted=entry["retry_exhausted"])
-        if login_expired():
+        if decision != "skipped_not_eligible" and login_expired():
             log("  ⚠️ 检测到登录失效，尝试重新注入 Cookie...")
             refresh_login()
         time.sleep(5); continue

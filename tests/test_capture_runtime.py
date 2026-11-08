@@ -35,6 +35,20 @@ def test_detail_url_pairing_and_late_or_missing_attribution():
     assert {url for live_id, url in detail_live_urls(ambiguous) if live_id == "current"} == {"one", "two"}
 
 
+def test_skipped_room_cools_down_without_consuming_failure_budget(tmp_path):
+    path = tmp_path / "retry.json"
+    state = RetryState(path, "run", cooldown_seconds=60, max_failures=3, clock=lambda: 1000)
+    entry = state.skipped("123", "platform_flag_false")
+    assert entry["failure_count"] == 0
+    assert entry["retry_exhausted"] is False
+    assert state.eligible("123", now=1059) == (False, 1)
+    assert state.eligible("123", now=1061) == (True, 0)
+    state.failed("123", "network")
+    state.skipped("123", "platform_flag_false")
+    assert state.entry("123")["failure_count"] == 1
+    assert state.entry("123")["retry_exhausted"] is False
+
+
 def test_retry_state_new_run_preserves_cooldown_with_lower_limit(tmp_path):
     path = tmp_path / "retry.json"
     path.write_text(json.dumps({"schema_version": 1, "run_id": "old", "rooms": {

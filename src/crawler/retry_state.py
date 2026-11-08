@@ -94,6 +94,26 @@ class RetryState:
         self._save()
         return dict(self.data["rooms"][key])
 
+    def skipped(self, live_id, reason="skipped_not_eligible"):
+        """Defer a room that is not eligible without counting it as a failure.
+
+        A non-digital room should not consume the failure budget or trigger
+        repeated immediate rescans; it still gets the normal cooldown before a
+        later eligibility check.
+        """
+        key = str(live_id)
+        previous = self.data["rooms"].get(key, {"failure_count": 0})
+        now = self.clock()
+        self.data["rooms"][key] = {
+            "failure_count": int(previous.get("failure_count", 0)),
+            "last_failure_t": now,
+            "cooldown_until": now + self.cooldown_seconds,
+            "retry_exhausted": bool(previous.get("retry_exhausted", False)),
+            "last_reason": str(reason)[:160],
+        }
+        self._save()
+        return dict(self.data["rooms"][key])
+
     def succeeded(self, live_id):
         if str(live_id) in self.data["rooms"]:
             del self.data["rooms"][str(live_id)]
