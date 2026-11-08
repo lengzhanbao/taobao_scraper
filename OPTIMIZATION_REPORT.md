@@ -38,6 +38,7 @@
 | 响应归属 | `matched` / `conflict` / `unscoped` / `unknown`；派生表可能接受 `unknown` | `matched` / `context_only` / `conflict` / `unknown`；旧 `unscoped` 读取时映射为 `context_only`；严格派生只接受 `matched` | `src/crawler/response_attribution.py`、`src/crawler/taobao_crawler.py`、`src/parser/parse_data.py` | 已完成 |
 | 时间对齐 | 有录制墙钟与 FFprobe 时长，但没有独立时间证据文件；没有区分媒体 PTS 与接口接收时间 | 新增 `timing_evidence.json`：墙钟、媒体 PTS、接口时间基准、页面刷新/FFmpeg 尝试事件、`approximate`/`unresolved` 与 `null` 不确定性 | `src/utils/segment_evidence.py`、`src/crawler/recording.py`、`src/parser/parse_data.py` | 已完成 |
 | 失败样本 | 日志有失败原因，但没有统一可分析台账 | 新增 `collection_attempts_instance_<N>.jsonl`，区分未开播/非数字人/网络/验证码/接流/录制/核验失败并关联 `recording_id` | `src/crawler/attempt_log.py`、`src/crawler/taobao_crawler.py` | 已完成 |
+| 扫描调度 | 非数字人/缺标记房间也按失败计数，达到上限后永久跳过 | 按规则跳过，只进入冷却，不消耗失败预算；网络/接流/录制失败仍正常重试 | `src/crawler/retry_state.py`、`src/crawler/taobao_crawler.py` | 已完成 |
 | 内存/磁盘 | 最终 JSON 把 journal 全部读入 Python 列表后再 `json.dump`，峰值约为全部响应的对象内存 | 最终 JSON 仍内嵌 `responses`（兼容），但按 journal 逐行流式写入；新增 `responses_journal`、`captured_count`、`journal_sha256` | `src/utils/safe_io.py`、`src/crawler/recording.py` | 已完成（兼容模式） |
 | 归档输出 | 归档 manifest 只有 JSON/视频/弹幕/汇总；分析文件未被 `inspect_archive` 核验 | 新增会话级商品事件/质量/时间文件；每个 `recording_id` 独立分析目录和 `manifest.json`；`inspect_archive` 逐文件核对 SHA256、录制标识、严格/候选状态，并拒绝索引缺失或篡改 | `src/parser/parse_data.py`、`src/utils/segment_evidence.py` | 已完成 |
 | 旧数字人工具 | `collect_digital.py` 仍把响应正文截断到 800,000 字符 | 保留完整正文并记录 `body_truncated=false` / `body_original_chars` | `src/detector/collect_digital.py` | 已完成 |
@@ -125,7 +126,8 @@
 
 - 每次扫描/录制尝试一行；
 - 能区分“本来不符合条件”和“网络/登录/接流/核验失败”；
-- 成功记录关联 `recording_id`、时长与目标达成状态。
+- 成功记录关联 `recording_id`、时长与目标达成状态；
+- 非数字人/缺标记房间按 `skipped_not_eligible` 进入正常冷却，不消耗失败次数，不会因多次扫描被误判为失败房间，也不会立即重复扫描。
 
 ### 4.6 平台身份字段
 
@@ -304,10 +306,10 @@ python -m pytest tests/ -q
 
 ```text
 python -m pytest tests/ -q
-116 passed, 3 subtests passed in 293.13s
+117 passed, 3 subtests passed in 292.84s
 ```
 
-新增 18 个测试，覆盖：
+新增 19 个测试，覆盖：
 
 - 20 分钟收益下的目标达成率与 7 分钟“技术有效但目标未达成”；
 - 无音轨与媒体事实 unknown；
@@ -319,7 +321,8 @@ python -m pytest tests/ -q
 - 采集台账；
 - 流式最终 JSON；
 - `parse_data` 生成会话级研究文件并保留旧 JSON 可读性；
-- 控制台质量计数分离。
+- 控制台质量计数分离；
+- 非数字人/缺标记房间跳过并冷却，不消耗失败次数。
 
 ### 7.3 前端与语法
 

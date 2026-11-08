@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 新增严格/候选两套商品事件文件：`product_events_strict.jsonl`（仅 matched）与 `product_events_candidate.jsonl`（仅 context_only），合并视图继续保留。
 - 每个 `recording_id` 在 `sessions/<房间>/recordings/<recording_id>/` 拥有独立分析目录与 `manifest.json`；`archive_manifest.json` 增加 `recording_analysis` 索引。
 - `inspect_archive` 校验逐录制分析索引完整性、文件 SHA256、raw/video 凭据一致性、质量/时间 `recording_id`、商品事件归属及严格/候选状态；篡改或缺失时不计入完整归档段。
+- 非数字人或缺少数字人标记的房间改为“按规则跳过”并只进入正常冷却，不再消耗失败次数或触发立即重复扫描；网络/接流/录制失败仍按失败重试。
 
 ### Changed
 - 最终 JSON 升级到 schema 2：以响应 journal 为完整原文来源，`responses` 仍按兼容要求内嵌，但改为流式写入，避免终结阶段把全部响应重复加载进内存；同时记录 `responses_journal`、`captured_count`、`journal_sha256`。
