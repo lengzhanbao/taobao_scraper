@@ -86,7 +86,7 @@ function canonicalLiveId(value) {
 function duration(seconds) { const n=Math.max(0,Math.floor(seconds||0));return Math.floor(n/60)+":"+String(n%60).padStart(2,"0"); }
 function statusClock(value) {const timestamp=typeof value==="number"?value*1000:Date.parse(value);return Number.isFinite(timestamp)?new Date(timestamp).toLocaleTimeString():"未知时间";}
 function pendingRoomCount(status) {const count=Number.isFinite(status?.pending_rooms)?Math.max(0,status.pending_rooms):null;const listed=Array.isArray(status?.pending_archive_rooms)?status.pending_archive_rooms.length:null;return count===null?listed:listed===null?count:Math.max(count,listed);}
-function scanResultName(value) {return ({in_progress:"扫描中",success_title_rule:"标题规则命中",success_platform_flag:"平台标记通过",non_digital:"非数字人",missing_digital_flag:"缺少数字人标记",network_or_navigation_error:"网络或页面导航错误",captcha_timeout_or_stop:"验证码等待超时或已停止",journal_write_error:"响应写入失败",scan_failed:"扫描失败"})[value]||String(value||"");}
+function scanResultName(value) {return ({in_progress:"扫描中",success_title_rule:"标题规则命中",success_platform_flag:"平台标记通过",non_digital:"非数字人",missing_digital_flag:"缺少数字人标记",network_or_navigation_error:"网络或页面导航错误",captcha_timeout_or_stop:"验证码等待超时或已停止",journal_write_error:"响应写入失败",ambiguous_live_detail_response:"直播 ID 归属冲突",missing_stream_or_unattributed_response:"未取得可归属直播流/详情",scan_failed:"扫描失败"})[value]||String(value||"");}
 function statusDetails(status, waitingReason="") {
   if(!status||typeof status!=="object")return "";
   const lines=[];
@@ -164,6 +164,13 @@ function renderInstances() {
       (unverified?" · "+unverified+" 间未核验":"");
     tr.children[4].replaceChildren(progressBlock(completed==null?null:completed,target,progressLabel));
     if(i.progress_source) {const note=document.createElement("small");note.textContent=i.progress_source;tr.children[4].append(note);}
+    const qmet=i.target_duration_met_segments,qnot=i.target_duration_not_met_segments,qaudio=i.audio_missing_segments,qunknown=i.quality_unknown_segments;
+    if([qmet,qnot,qaudio,qunknown].some(Number.isFinite)) {
+      const note=document.createElement("small");
+      note.textContent="目标达成 "+(Number.isFinite(qmet)?qmet:"?")+" · 未达成 "+(Number.isFinite(qnot)?qnot:"?")+
+        " · 缺音轨 "+(Number.isFinite(qaudio)?qaudio:"?")+(Number.isFinite(qunknown)&&qunknown>0?" · 目标未知 "+qunknown:"");
+      tr.children[4].append(note);
+    }
     const job=state.jobs.find(j=>j.instance_id===i.id);
     const label=tr.children[5].children[0];label.className="job-phase"+(job?.alive&&job.phase!=="paused"&&!connectionLost?" running":"");label.textContent=connectionLost?"连接中断 · 状态未知":job?(phaseNames[job.phase]||job.phase):"未启动";
     if(job?.stop_requested&&job.alive)label.textContent+=" · 停止已请求";
@@ -182,6 +189,42 @@ function renderInstances() {
     if(job?.alive&&!job.pause_supported) {const note=document.createElement("small");note.textContent="下次启动支持暂停";tr.children[7].append(note);}
   }
   $("enabled-count").textContent=state.instances.filter(i=>i.enabled).length+" 个实例已启用";
+}
+function attemptTimeText(row) {
+  if(Number.isFinite(row.attempt_end_t)) return new Date(row.attempt_end_t*1000).toLocaleString();
+  const timestamp=Date.parse(row.attempt_end_time||"");
+  return Number.isFinite(timestamp)?new Date(timestamp).toLocaleString():"未知时间";
+}
+function attemptResultText(row) {
+  if(row.decision==="recorded") {
+    const met=row.target_duration_met===true?"目标达成":row.target_duration_met===false?"目标未达成":"目标未知";
+    return "已录制 · "+met;
+  }
+  return row.decision_text||row.decision||"未知结果";
+}
+function renderAttempts() {
+  const body=$("attempt-rows");if(!body||!state)return;
+  const rows=Array.isArray(state.recent_attempts)?state.recent_attempts:[];
+  $("attempt-count").textContent=rows.length+" 条";
+  body.replaceChildren();
+  if(!rows.length) {
+    const tr=document.createElement("tr");const td=cell("暂无采集尝试记录（2.8.0 起生成）");td.colSpan=7;tr.append(td);body.append(tr);return;
+  }
+  for(const row of rows) {
+    const tr=document.createElement("tr");
+    tr.append(cell(attemptTimeText(row)));
+    tr.append(cell(Number.isInteger(row.instance_id)?"Edge "+row.instance_id:"—"));
+    tr.append(cell(row.live_id||"—"));
+    tr.append(cell(row.stage==="recording"?"录制":"扫描"));
+    tr.append(cell(attemptResultText(row)));
+    const reason=cell(row.reason_text||"—");
+    if(row.detail?.error)reason.title=String(row.detail.error);
+    tr.append(reason);
+    const recording=cell(row.recording_id?String(row.recording_id).slice(0,8):"—",
+      Number.isFinite(row.recording_duration_seconds)?duration(row.recording_duration_seconds):"");
+    tr.append(recording);
+    body.append(tr);
+  }
 }
 function renderChecks(result) {
   if(!result) return;
@@ -212,7 +255,7 @@ async function refreshState() {
       for(const id of ["url-instance","url-text","url-add-text","url-import","url-load","url-reload",
                        "url-save","url-append","correct-live-id","correct-count","correct-reason",
                        "correct-confirmed","correct-submit"]) $(id).disabled=true;
-      if(state) {renderInstances();renderChannelOverview();}
+      if(state) {renderInstances();renderChannelOverview();renderAttempts();}
     }
     throw error;
   }
@@ -226,7 +269,7 @@ async function refreshState() {
   $("run-summary").hidden=!settingsV27Supported;
   scheduleStatePoll();
   if(!dirty) fillSettings();
-  renderInstances();renderChannelOverview();renderChecks(state.preflight);
+  renderInstances();renderChannelOverview();renderAttempts();renderChecks(state.preflight);
   $("rooms").textContent=state.totals.rooms;$("completed").textContent=state.totals.completed_rooms;$("recorded").textContent=state.totals.recorded_segments;$("remaining").textContent=state.totals.remaining_segments;
   $("verified").textContent=Number.isFinite(state.totals.valid_segments)?state.totals.valid_segments:"未核验";
   $("archived").textContent=Number.isFinite(state.totals.archived_segments)?state.totals.archived_segments:"未核验";
@@ -331,6 +374,15 @@ function digitalMarkerText(markers, validCount) {
   if(!Number.isFinite(validCount)||!markers||!["all_true","not_all_true","missing"].every(key=>Number.isFinite(markers[key])))return "未核验";
   return markers.all_true+" / "+markers.not_all_true+" / "+markers.missing;
 }
+function qualitySummary(row) {
+  const values=Object.values(row.quality_records||{}).filter(value=>value&&typeof value==="object");
+  if(!values.length)return "未核验";
+  const met=values.filter(value=>value.target_duration_met===true).length;
+  const notMet=values.filter(value=>value.target_duration_met===false).length;
+  const unknown=values.filter(value=>value.target_duration_met===null||value.target_duration_met===undefined).length;
+  const noAudio=values.filter(value=>value.has_audio===false).length;
+  return "目标 "+met+"/"+(met+notMet)+" · 缺音轨 "+noAudio+(unknown?" · 未知 "+unknown:"");
+}
 function renderUrlRows(rows) {
   $("url-count").textContent=rows.length+" 间";
   $("url-rows").replaceChildren();
@@ -340,6 +392,7 @@ function renderUrlRows(rows) {
       cell(Number.isFinite(row.valid_count)?row.valid_count:"未核验"),
       cell(digitalMarkerText(row.digital_markers,row.valid_count)),
       cell(Number.isFinite(row.archived_count)?row.archived_count:"未核验"),
+      cell(qualitySummary(row)),
       cell(row.validation_state||(row.count>=row.target?"历史计数已满":"待录制"),
         row.archive_issues?.length?"归档待核查："+row.archive_issues[0]:null));
     $("url-rows").append(tr);

@@ -346,6 +346,95 @@ def existing_crawler_pids():
     return pids if isinstance(pids, list) else [pids]
 
 
+ATTEMPT_DECISION_TEXT = {
+    "recorded": "已录制",
+    "skipped_not_eligible": "按规则跳过",
+    "failed_scan": "扫描失败",
+    "failed_recording": "录制失败",
+    "stopped": "已停止",
+    "paused": "已暂停",
+}
+ATTEMPT_REASON_TEXT = {
+    "platform_flag_false": "平台标记 false，按样本规则跳过",
+    "digital_flag_missing": "未捕获数字人标记，待核查",
+    "network_or_navigation_error": "网络或页面导航失败",
+    "captcha_timeout_or_stop": "验证码等待超时或已停止",
+    "journal_write_error": "响应日志写入失败，原始数据保留",
+    "ambiguous_live_id": "响应含多个直播 ID，已保留原始响应",
+    "stream_or_detail_not_attributed": "未取得可归属的直播流或直播详情",
+    "scan_exception": "扫描过程异常",
+    "connect_timeout": "FFmpeg 接流超时",
+    "stream_stalled": "视频流停止增长，已保留文件",
+    "technical_validation_failed": "视频实测时长不足或无法读取",
+    "connect_or_journal_failure": "接流失败或响应日志写入失败",
+    "record_segment_failed": "录制失败",
+    "stop_requested": "收到停止请求",
+    "stop_requested_after_scan": "扫描后收到停止请求",
+    "pause_before_recording": "录制前已暂停",
+}
+
+
+def attempt_reason_text(reason):
+    if not reason:
+        return ""
+    text = str(reason)
+    return ATTEMPT_REASON_TEXT.get(text, text.replace("_", " ")[:160])
+
+
+def read_recent_attempts(paths, limit=20):
+    """Read only complete tail rows so a long-running ledger stays cheap."""
+    rows = []
+    for path in paths:
+        path = Path(path)
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                stream.seek(max(0, size - 256 * 1024))
+                raw = stream.read()
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    rows.sort(key=lambda item: (item.get("attempt_end_t") or 0,
+                                item.get("attempt_start_t") or 0), reverse=True)
+    result = []
+    for row in rows[:limit]:
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        selected = {key: detail.get(key) for key in
+                    ("scan_result", "error", "message", "has_audio",
+                     "attempt_count", "product_event_count")
+                    if detail.get(key) is not None}
+        decision = str(row.get("decision") or "")
+        reason = str(row.get("failure_reason") or "")
+        result.append({
+            "run_id": row.get("run_id"),
+            "instance_id": row.get("instance_id"),
+            "live_id": row.get("live_id"),
+            "attempt_id": row.get("attempt_id"),
+            "stage": row.get("stage"),
+            "decision": decision,
+            "decision_text": ATTEMPT_DECISION_TEXT.get(decision, decision or "未知结果"),
+            "failure_reason": reason or None,
+            "reason_text": attempt_reason_text(reason),
+            "attempt_end_time": row.get("attempt_end_time"),
+            "attempt_end_t": row.get("attempt_end_t"),
+            "attempt_start_t": row.get("attempt_start_t"),
+            "retry_count": row.get("retry_count"),
+            "recording_id": row.get("recording_id"),
+            "segment_index": row.get("segment_index"),
+            "recording_duration_seconds": row.get("recording_duration_seconds"),
+            "target_duration_met": row.get("target_duration_met"),
+            "quality_state": row.get("quality_state"),
+            "detail": selected,
+        })
+    return result
+
+
 class Manager:
     def __init__(self, initial=None, control=CONTROL):
         self.control = Path(control)
@@ -367,6 +456,7 @@ class Manager:
         self.run = load_json(self.control / "active_run.json", {})
         self.check_cache = None
         self._archive_cache = ("", 0, {})
+        self._attempts_cache = ((), 0.0, [])
         self.evidence_cache = EvidenceCache()
         self._progress_parse_cache = {}
         self._event_writers = {}
@@ -538,6 +628,34 @@ class Manager:
 
     def archive_counts(self, study_root):
         return {live_id: len(records) for live_id, records in self.archive_records(study_root).items()}
+
+    def attempt_paths(self):
+        run_dir = self._run_dir()
+        paths = sorted(run_dir.glob("collection_attempts_instance_*.jsonl")) if run_dir else []
+        if not paths:
+            study = Path(self.settings["study_root"])
+            if study.is_dir():
+                paths = sorted(study.glob(
+                    "_staging/browser_*/collection_attempts_instance_*.jsonl"))
+        return paths
+
+    def recent_attempts(self, limit=20):
+        paths = self.attempt_paths()
+        signature = []
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature.append((str(path), stat.st_size, stat.st_mtime_ns))
+        signature = tuple(signature)
+        now = time.monotonic()
+        cached_signature, cached_at, cached_rows = self._attempts_cache
+        if signature == cached_signature and now - cached_at < 10:
+            return cached_rows
+        rows = read_recent_attempts(paths, limit)
+        self._attempts_cache = (signature, now, rows)
+        return rows
 
     def jobs(self):
         jobs = []
@@ -1046,7 +1164,8 @@ class Manager:
             worker_gap = any(job.get("status", {}).get("telemetry_gap") for job in jobs)
             return {"settings": self.settings, "default_settings": defaults(), "runtime_fields": RUNTIME_FIELDS,
                     "instances": instances, "totals": totals,
-                    "jobs": jobs, "preflight": self.check_cache,
+                    "jobs": jobs, "recent_attempts": self.recent_attempts(),
+                    "preflight": self.check_cache,
                     "run_settings": self.run.get("settings") if self.run.get("run_id") else None,
                     "telemetry_gap": bool(controller_gap or worker_gap),
                     "version": VERSION, "code_root": str(ROOT),

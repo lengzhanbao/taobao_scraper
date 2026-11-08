@@ -46,7 +46,14 @@ const fixture = {token:"synthetic",version:"2.7.0-local-panel",code_root:"synthe
       status:{live_id:"123",segment_index:1,elapsed_seconds:45,planned_duration_seconds:60,
         latest_response_t:1760000000,last_persisted_t:1760000002,last_persisted_sequence:42,
         unattributed_response_count:3,journal_error:true,last_scan_result:"non_digital",
-        pending_rooms:2,pending_archive_reason:"自然结束尾批归档失败，保留原始数据"}}]};
+        pending_rooms:2,pending_archive_reason:"自然结束尾批归档失败，保留原始数据"}}],
+  recent_attempts:[
+    {instance_id:2,live_id:"123",stage:"recording",decision:"recorded",decision_text:"已录制",
+      target_duration_met:false,recording_id:"rec-12345678",recording_duration_seconds:600,
+      attempt_end_t:1760000600,detail:{}},
+    {instance_id:1,live_id:"456",stage:"scan",decision:"failed_scan",decision_text:"扫描失败",
+      failure_reason:"network_or_navigation_error",reason_text:"网络或页面导航失败",
+      attempt_end_t:1760000500,detail:{error:"synthetic network"}}]};
 fixture.settings.instances=fixture.instances;
 fixture.default_settings=JSON.parse(JSON.stringify(fixture.settings));
 fixture.runtime_fields=Object.fromEntries(Object.entries({room_gap_seconds:[0,0,3600],page_refresh_seconds:[300,15,3600],status_refresh_seconds:[5,2,60],checkpoint_seconds:[30,5,600],listen_timeout_seconds:[2,1,30],scan_timeout_seconds:[30,5,180],connect_timeout_seconds:[30,5,180],captcha_timeout_seconds:[180,10,1800],stall_timeout_seconds:[60,10,600],max_record_attempts:[3,1,10],failure_cooldown_minutes:[120,1,1440],max_room_failures:[3,1,20],max_collected:[800,10,2000]}).map(([key,[value,min,max]])=>[key,{default:value,min,max,env:`LIVE_${key.toUpperCase()}`} ]));
@@ -111,6 +118,13 @@ async function main() {
   assert.ok(panelHtml.indexOf('id="urls"')<panelHtml.indexOf('id="settings"'));
   const channels=elements.get("channel-overview-grid").children;
   assert.equal(channels.length,5);
+  const attempts=elements.get("attempt-rows").children;
+  assert.equal(attempts.length,2);
+  assert.match(attempts[0].textContent,/已录制 · 目标未达成/);
+  assert.match(attempts[0].textContent,/rec-1234/);
+  assert.match(attempts[0].textContent,/10:00/);
+  assert.match(attempts[1].textContent,/网络或页面导航失败/);
+  assert.equal(elements.get("attempt-count").textContent,"2 条");
   assert.match(channels[0].textContent,/Edge 1.*已暂停/s);
   assert.match(channels[1].textContent,/Edge 2.*录制中.*第 1 段 · 123/s);
   assert.match(channels[1].textContent,/技术有效进度 · 1 \/ 1 段/);
@@ -350,11 +364,13 @@ async function main() {
   await stale;
   assert.equal(elements.get('url-rows').children[0].children[0].textContent,'222');
   assert.equal(elements.get('url-text').value,'https://tbzb.taobao.com/live?liveId=222');
-  urlRowOverride={count:1,target:3,valid_count:1,digital_markers:{all_true:1,not_all_true:0}};
+  urlRowOverride={count:1,target:3,valid_count:1,digital_markers:{all_true:1,not_all_true:0},
+    quality_records:{a:{target_duration_met:true,has_audio:true},b:{target_duration_met:false,has_audio:false}}};
   await vm.runInContext('refreshUrlStats()',context);
   assert.equal(elements.get('url-rows').children[0].children[2].textContent,'1');
   assert.equal(elements.get('url-rows').children[0].children[3].textContent,'未核验');
   assert.equal(elements.get('url-rows').children[0].children[4].textContent,'未核验');
+  assert.equal(elements.get('url-rows').children[0].children[5].textContent,'目标 1/2 · 缺音轨 1');
   const savedJobs=fixture.jobs;
   fixture.jobs=[{instance_id:3,alive:false,phase:"finished",status:{pending_rooms:2,
     pending_archive_rooms:["room-a","room-b"],pending_archive_reason:"自然结束尾批归档失败"}}];

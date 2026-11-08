@@ -11,6 +11,7 @@
     <div class="nav-label">工作空间</div>
     <a class="nav active" href="#overview">◈ <span>采集控制台</span></a>
     <a class="nav" href="#instances">▤ <span>实例与进度</span></a>
+    <a class="nav" href="#attempts">⚑ <span>最近采集</span></a>
     <a class="nav" href="#urls">↗ <span>直播网址管理</span></a>
     <a class="nav" href="#settings">⚙ <span>录制设置</span></a>
     <a class="nav" href="#timeline">◷ <span>运行时间线</span></a>
@@ -36,6 +37,11 @@
       <details class="run-summary-details"><summary>本次运行与下次启动参数</summary><p id="run-summary" class="hint" hidden>当前运行参数与下次启动参数会分别显示。</p></details>
       <div class="table-scroll"><table><thead><tr><th>下次启用</th><th>浏览器实例</th><th>每房间段数</th><th>历史计数满段 / 总数</th><th>有效段进度</th><th>运行状态</th><th>当前录制</th><th>实例控制</th></tr></thead><tbody id="instance-rows"></tbody></table></div>
     </section>
+    <section class="card" id="attempts">
+      <div class="card-header"><div><h2>最近采集尝试</h2><p>查看每个直播间为什么进入、跳过或失败；失败段与原始响应仍然保留。</p></div><span class="tag muted" id="attempt-count">0 条</span></div>
+      <div class="table-scroll"><table><thead><tr><th>时间</th><th>实例</th><th>直播 ID</th><th>阶段</th><th>结果</th><th>原因 / 细节</th><th>录制段</th></tr></thead><tbody id="attempt-rows"><tr><td colspan="7">读取中…</td></tr></tbody></table></div>
+      <p class="hint">来自 2.8.0 采集尝试台账，仅显示最近 20 条；失败不等于原始数据被删除。</p>
+    </section>
     <section class="card" id="urls">
       <div class="card-header"><div><h2>直播网址管理</h2><p>直接编辑 urls.txt 清单；每个实例有独立清单，不需要打开文件夹。</p></div><span class="tag">自动去重 · 保存前备份</span></div>
       <div class="url-workspace">
@@ -43,7 +49,7 @@
         <p id="url-path" class="file-path">加载后显示网址文件位置</p>
         <div class="url-editor-grid"><div><label for="url-text">采集清单 · 每行一个淘宝直播链接或直播 ID</label><textarea id="url-text" rows="10" spellcheck="false" placeholder="https://tbzb.taobao.com/live?liveId=123456789&#10;也可以粘贴旧清单，已录制计数会保留。"></textarea><div class="editor-footer"><span id="url-note" role="status">先加载对应实例的清单</span><button id="url-save" class="primary" disabled>保存清单</button></div></div>
           <div class="url-add"><h3>批量追加网址</h3><p>追加到已保存清单；同一直播 ID 自动合并，不重置已录制段数。</p><textarea id="url-add-text" rows="5" spellcheck="false" aria-label="追加网址" placeholder="把新网址粘贴到这里，每行一个"></textarea><button id="url-append" disabled>添加到这个实例</button><p class="hint">编辑清单时移出的行会保留为停用历史；原文件另有完整备份。运行期间保存，下一次启动生效。</p></div></div>
-        <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>历史计数 / 目标</th><th>技术有效段</th><th>全true / 非全true / 未捕获</th><th>完整归档段</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
+        <details><summary>已保存的直播间与进度 <span id="url-count">0 间</span></summary><div class="table-scroll"><table><thead><tr><th>直播 ID</th><th>历史计数 / 目标</th><th>技术有效段</th><th>全true / 非全true / 未捕获</th><th>完整归档段</th><th>质量</th><th>状态</th></tr></thead><tbody id="url-rows"></tbody></table></div></details>
         <details class="count-correction"><summary>核对后更正错误历史计数</summary><p class="hint">仅修正所选实例的源网址清单；原文件会备份并记录到审计日志。运行中的任务继续使用启动时的清单。更正值不能低于已核验或已归档段数。</p>
           <div class="correction-grid"><label>直播 ID<input id="correct-live-id" inputmode="numeric" maxlength="30" placeholder="从上方表格复制"></label><label>实际有效段数<input id="correct-count" type="number" min="0" max="10000" step="1" placeholder="0"></label><label class="correction-reason">更正原因<input id="correct-reason" maxlength="200" placeholder="例如：逐段核对视频和 final JSON 后发现旧计数偏高"></label></div>
           <label class="confirm-label"><input id="correct-confirmed" type="checkbox">我已对照实际有效视频与 final JSON 核对段数</label><button id="correct-submit" disabled>备份并更正历史计数</button>
