@@ -57,17 +57,43 @@ def _json_object(value):
     return parsed if isinstance(parsed, dict) else {}
 
 
+CONVERSION_RULES = {
+    "item_price": ("yuan_to_cny_1:1", "parser_convention"),
+    "promotion_price": ("cents_to_cny_divide_100", "api_field_convention"),
+    "public_promotion_price": ("cents_to_cny_divide_100", "api_field_convention"),
+    "single_promotion_price": ("cents_to_cny_divide_100", "api_field_convention"),
+}
+
+
 def _price_observation(role, raw_value, *, unit, unit_basis, evidence_path, desc=None):
-    """Keep the raw amount and the unit conversion basis next to each other."""
+    """Keep raw amount, normalized amount and conversion rule together.
+
+    If a field has no reliable conversion rule, keep the raw value and leave
+    the normalized value null rather than silently assuming a unit.
+    """
     value = _finite(raw_value)
-    if value is None:
+    if value is None or value < 0:
         return None
-    if unit_basis == "live_item_price_in_cents":
-        value = value / 100
-    if value < 0:
-        return None
-    observation = {"role": role, "raw_value": str(raw_value), "value": round(value, 2),
-                   "unit": unit, "unit_basis": unit_basis, "evidence_path": evidence_path}
+    conversion_rule, unit_certainty = CONVERSION_RULES.get(role, (None, "unknown"))
+    if conversion_rule == "cents_to_cny_divide_100":
+        normalized = value / 100
+    elif conversion_rule == "yuan_to_cny_1:1":
+        normalized = value
+    else:
+        normalized = None
+    observation = {
+        "role": role,
+        "raw_price": str(raw_value),
+        "raw_value": str(raw_value),
+        "normalized_price": round(normalized, 2) if normalized is not None else None,
+        "value": round(normalized, 2) if normalized is not None else None,
+        "unit": unit if normalized is not None else None,
+        "unit_basis": unit_basis,
+        "unit_certainty": unit_certainty,
+        "conversion_rule": conversion_rule,
+        "source_field_path": evidence_path,
+        "evidence_path": evidence_path,
+    }
     if desc:
         observation["desc"] = desc
     return observation
@@ -268,9 +294,25 @@ def product_intervals(events):
                 "end_seconds": event["event_relative_seconds"],
                 "start_event_id": run_event.get("event_id"),
                 "end_event_id": event.get("event_id"),
+                "start_evidence": {
+                    "event_id": run_event.get("event_id"),
+                    "source_api": run_event.get("source_api"),
+                    "role_evidence": run_event.get("role_evidence"),
+                    "received_at": run_event.get("received_at"),
+                },
+                "end_evidence": {
+                    "event_id": event.get("event_id"),
+                    "source_api": event.get("source_api"),
+                    "role_evidence": event.get("role_evidence"),
+                    "received_at": event.get("received_at"),
+                },
                 "attribution_status": "matched",
                 "basis": "consecutive_current_item_observations",
-                "note": "区间由前后两次当前商品观测界定；不代表屏幕每一秒都已核验",
+                "interval_basis": "consecutive_current_item_observations",
+                "is_continuity_observed": False,
+                "continuity_observed": False,
+                "confidence": "inferred_boundary",
+                "limitation": "只由前后两个当前商品观测界定；区间内是否持续展示未被观测",
             })
         run_start, run_event = event["event_relative_seconds"], event
     return intervals
@@ -325,6 +367,32 @@ def summarize_product_events(events, intervals=()):
         "last_event_relative_seconds": max(relative) if relative else None,
         "note": "事件为接口观测；区间为由相邻观测推断的候选，不默认列表第一项为当前商品",
     }
+
+
+def split_event_sets(events):
+    """Return (strict, candidate) without dropping either set."""
+    strict = [event for event in events
+              if event.get("attribution_status") == "matched"]
+    candidate = [event for event in events
+                 if event.get("attribution_status") == "context_only"]
+    return strict, candidate
+
+
+def summarize_event_sets(events, intervals=()):
+    """Combined summary plus non-overlapping strict and candidate summaries."""
+    events, intervals = list(events), list(intervals)
+    strict, candidate = split_event_sets(events)
+    summary = summarize_product_events(events, intervals)
+    summary["strict"] = summarize_product_events(strict, intervals)
+    summary["candidate"] = summarize_product_events(candidate, [])
+    summary["event_sets"] = {
+        "strict_event_count": len(strict),
+        "candidate_event_count": len(candidate),
+        "strict_interval_count": len(intervals),
+        "candidate_interval_count": 0,
+        "note": "严格集只含 matched；候选集只含 context_only；两套互不覆盖",
+    }
+    return summary
 
 
 def iter_product_events(responses, context):

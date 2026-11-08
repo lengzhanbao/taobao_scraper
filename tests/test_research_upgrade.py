@@ -18,8 +18,8 @@ from src.parser import parse_data
 from src.parser.product_events import (extract_product_events, latest_current_candidate,
                                        product_intervals, summarize_product_events)
 from src.utils.safe_io import atomic_json, atomic_json_with_raw_array, digest, probe_media
-from src.utils.segment_evidence import (recording_quality, target_duration, timing_evidence,
-                                        validation_matches, video_validation)
+from src.utils.segment_evidence import (inspect_archive, recording_quality, target_duration,
+                                        timing_evidence, validation_matches, video_validation)
 
 LIVE_ID = "123456789"
 
@@ -160,7 +160,16 @@ def test_product_events_keep_multiple_items_and_price_roles():
     assert single[0]["promotion_price_desc"] == "入会价"
     roles = {row["role"]: row for row in single[0]["price_observations"]}
     assert roles["item_price"]["value"] == pytest.approx(239.0)
+    assert roles["item_price"]["raw_price"] == "239"
+    assert roles["item_price"]["normalized_price"] == pytest.approx(239.0)
+    assert roles["item_price"]["conversion_rule"] == "yuan_to_cny_1:1"
+    assert roles["item_price"]["source_field_path"].endswith("itemPrice")
+    assert roles["item_price"]["unit_certainty"] == "parser_convention"
     assert roles["promotion_price"]["value"] == pytest.approx(183.27)
+    assert roles["promotion_price"]["raw_price"] == "18327"
+    assert roles["promotion_price"]["normalized_price"] == pytest.approx(183.27)
+    assert roles["promotion_price"]["conversion_rule"] == "cents_to_cny_divide_100"
+    assert roles["promotion_price"]["unit_certainty"] == "api_field_convention"
     assert roles["public_promotion_price"]["value"] == pytest.approx(183.27)
     assert roles["single_promotion_price"]["value"] == pytest.approx(239.0)
     assert single[0]["original_price"] is None
@@ -267,6 +276,12 @@ def test_product_intervals_need_two_observed_boundaries():
     assert intervals[0]["start_seconds"] == 10.0
     assert intervals[0]["end_seconds"] == 60.0
     assert intervals[0]["basis"] == "consecutive_current_item_observations"
+    assert intervals[0]["interval_basis"] == "consecutive_current_item_observations"
+    assert intervals[0]["is_continuity_observed"] is False
+    assert intervals[0]["continuity_observed"] is False
+    assert intervals[0]["confidence"] == "inferred_boundary"
+    assert "持续展示" in intervals[0]["limitation"]
+    assert intervals[0]["start_evidence"]["event_id"] == intervals[0]["start_event_id"]
     same = extract_product_events(
         product_response("mtop.tblive.live.item.callback.query", [item()],
                          sequence=3, received_at=1090.0), CONTEXT)
@@ -406,6 +421,8 @@ def test_parse_data_writes_research_artifacts_and_keeps_old_json_readable(tmp_pa
          "navigation_id": "nav", "attribution_status": "matched"},
         product_response("mtop.tblive.live.item.callback.query", [item()], sequence=2,
                          received_at=1010.0),
+        product_response("mtop.tblive.live.item.callback.query", [item("444")],
+                         sequence=4, received_at=1020.0, status="context_only"),
         {"t": 1002.0, "received_at": 1002.0, "url": "https://h5api.m.taobao.com/h5/mtop.taobao.iliad.comment.query.latest/1.0/",
          "body": json.dumps({"ret": ["SUCCESS::调用成功"],
                              "data": {"comments": [{"publisherNick": "u", "content": "hi",
@@ -430,7 +447,17 @@ def test_parse_data_writes_research_artifacts_and_keeps_old_json_readable(tmp_pa
     session = next((study / "sessions").glob("*_" + LIVE_ID))
     events = [json.loads(line) for line in (session / "product_events.jsonl")
               .read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(events) == 1 and events[0]["item_id"] == "987654321"
+    assert len(events) == 2
+    assert {event["attribution_status"] for event in events} == {"matched", "context_only"}
+    strict_events = [json.loads(line) for line in (session / "product_events_strict.jsonl")
+                     .read_text(encoding="utf-8").splitlines() if line.strip()]
+    candidate_events = [json.loads(line) for line in
+                        (session / "product_events_candidate.jsonl")
+                        .read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [event["item_id"] for event in strict_events] == ["987654321"]
+    assert [event["item_id"] for event in candidate_events] == ["444"]
+    assert all(event["attribution_status"] == "matched" for event in strict_events)
+    assert all(event["attribution_status"] == "context_only" for event in candidate_events)
     quality = json.loads((session / "recording_quality.json").read_text(encoding="utf-8"))
     assert quality["summary"]["target_duration_met_count"] == 1
     assert quality["summary"]["audio_present_count"] == 1
@@ -440,6 +467,39 @@ def test_parse_data_writes_research_artifacts_and_keeps_old_json_readable(tmp_pa
     assert manifest["segments"][0]["recording_quality"]["target_duration_met"] is True
     assert any(item["destination"].endswith("recording_quality.json")
                for item in manifest["analysis_files"])
+    analysis = manifest["recording_analysis"]
+    assert len(analysis) == 1 and analysis[0]["recording_id"] == "rec-1"
+    recording_dir = session / "recordings" / "rec-1"
+    recording_manifest = json.loads((recording_dir / "manifest.json")
+                                    .read_text(encoding="utf-8"))
+    assert recording_manifest["recording_id"] == "rec-1"
+    assert recording_manifest["live_id"] == LIVE_ID
+    assert {"raw_json", "video", "product_events", "product_events_strict",
+            "product_events_candidate", "product_intervals",
+            "recording_quality", "timing_evidence"} <= set(recording_manifest["files"])
+    assert json.loads((recording_dir / "recording_quality.json")
+                      .read_text(encoding="utf-8"))["recording_id"] == "rec-1"
+    with patch("src.utils.segment_evidence.probe_video", return_value=60.0):
+        _, records, _, errors = inspect_archive(session / "archive_manifest.json", "synthetic")
+    assert records == {"rec-1"} and not errors
+    manifest_path = session / "archive_manifest.json"
+    original_analysis = manifest["recording_analysis"]
+    manifest["recording_analysis"] = []
+    atomic_json(manifest_path, manifest)
+    with patch("src.utils.segment_evidence.probe_video", return_value=60.0):
+        _, records, _, errors = inspect_archive(manifest_path, "synthetic")
+    assert not records and errors
+    manifest["recording_analysis"] = original_analysis + original_analysis
+    atomic_json(manifest_path, manifest)
+    with patch("src.utils.segment_evidence.probe_video", return_value=60.0):
+        _, records, _, errors = inspect_archive(manifest_path, "synthetic")
+    assert not records and errors
+    manifest["recording_analysis"] = original_analysis
+    atomic_json(manifest_path, manifest)
+    (recording_dir / "product_events.jsonl").write_text('{"tampered": true}\n', encoding="utf-8")
+    with patch("src.utils.segment_evidence.probe_video", return_value=60.0):
+        _, records, _, errors = inspect_archive(session / "archive_manifest.json", "synthetic")
+    assert not records and errors
     summary_csv = next((session / "crawler").glob("lives_summary_*.csv"))
     with summary_csv.open(encoding="utf-8-sig", newline="") as stream:
         summary_rows = list(csv.DictReader(stream))

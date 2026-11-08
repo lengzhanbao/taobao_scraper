@@ -21,7 +21,8 @@ import uuid
 from src.utils.api_names import api_name
 from src.crawler.response_attribution import normalize_attribution_status
 from src.parser.product_events import (extract_product_events, latest_current_candidate,
-                                       product_intervals, summarize_product_events)
+                                       product_intervals, split_event_sets,
+                                       summarize_event_sets)
 from src.utils.digital_flags import (
     classify_digital_segment, find_values_by_key,
     summarize_digital_flags, summarize_room_digital_flags,
@@ -253,9 +254,59 @@ def segment_product_evidence(data, live_id, recording_id, segment_index, run_id,
                           or str(item.get("live_id")) == str(live_id))
                      and nonnegative_time(item.get("start_seconds"))]
     summary = data.get("product_event_summary")
-    if not isinstance(summary, dict) or summary.get("schema_version") != 1:
-        summary = summarize_product_events(events, intervals)
+    if (not isinstance(summary, dict) or summary.get("schema_version") != 1
+            or not isinstance(summary.get("event_sets"), dict)):
+        summary = summarize_event_sets(events, intervals)
     return events, intervals, summary
+
+
+def write_recording_analysis(sess_dir, *, recording_id, segment_index, run_id, live_id,
+                             quality, timing, events, strict_events, candidate_events,
+                             intervals, raw_evidence, video_evidence):
+    """Create a per-recording analysis folder with its own manifest.
+
+    This keeps every recording_id independently traceable even when a room has
+    several segments. Existing different content receives a .bak_ copy through
+    the derived writers instead of being silently overwritten.
+    """
+    folder = Path(sess_dir) / "recordings" / safe_name(str(recording_id or "recording"))
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest_path = folder / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            previous = {}
+        if (previous and (str(previous.get("recording_id")) != str(recording_id)
+                          or previous.get("segment_index") != segment_index)):
+            raise ValueError("录制分析目录已存在但录制标识或段号不一致，保留原目录")
+    product_events_path = folder / "product_events.jsonl"
+    strict_path = folder / "product_events_strict.jsonl"
+    candidate_path = folder / "product_events_candidate.jsonl"
+    intervals_path = folder / "product_intervals.jsonl"
+    quality_path = folder / "recording_quality.json"
+    timing_path = folder / "timing_evidence.json"
+    write_derived_jsonl(product_events_path, events)
+    write_derived_jsonl(strict_path, strict_events)
+    write_derived_jsonl(candidate_path, candidate_events)
+    write_derived_jsonl(intervals_path, intervals)
+    write_derived_json(quality_path, {**quality, "recording_id": recording_id,
+                                      "segment_index": segment_index})
+    write_derived_json(timing_path, {**timing, "recording_id": recording_id})
+    files = {"raw_json": raw_evidence, "video": video_evidence,
+             "product_events": file_evidence(product_events_path),
+             "product_events_strict": file_evidence(strict_path),
+             "product_events_candidate": file_evidence(candidate_path),
+             "product_intervals": file_evidence(intervals_path),
+             "recording_quality": file_evidence(quality_path),
+             "timing_evidence": file_evidence(timing_path)}
+    manifest = {"schema_version": 1, "recording_id": recording_id,
+                "segment_index": segment_index, "run_id": run_id, "live_id": live_id,
+                "files": files}
+    write_derived_json(manifest_path, manifest)
+    return {"recording_id": recording_id, "segment_index": segment_index,
+            "directory": str(folder.resolve()),
+            "manifest": file_evidence(manifest_path)}
 
 
 def nonnegative_time(value):
@@ -360,7 +411,10 @@ def process_room(room_dir):
     quality_records = []
     timing_records = []
     all_product_events = []
+    all_strict_product_events = []
+    all_candidate_product_events = []
     all_product_intervals = []
+    recording_analysis = []
     for fi, fp in enumerate(copied):
         print(f"  段{fi+1}: {os.path.basename(fp)[:30]}...")
         data = json.load(open(fp, encoding="utf-8"))
@@ -407,6 +461,7 @@ def process_room(room_dir):
         product_events, product_ivs, product_summary = segment_product_evidence(
             data, live_id, recording_id, data.get("segment_index", fi + 1),
             data.get("run_id"), responses)
+        strict_product_events, candidate_product_events = split_event_sets(product_events)
         attribution_summary = segment_attribution_summary(data, responses)
         current_product = latest_current_candidate(product_events)
 
@@ -620,6 +675,10 @@ def process_room(room_dir):
             "归属未知响应数": attribution_summary["by_status"].get("unknown", 0),
             "归属状态缺失响应数": attribution_summary.get("missing_status_count", 0),
             "商品事件数": product_summary.get("event_count", 0),
+            "严格商品事件数": product_summary.get("event_sets", {}).get(
+                "strict_event_count", len(strict_product_events)),
+            "候选商品事件数": product_summary.get("event_sets", {}).get(
+                "candidate_event_count", len(candidate_product_events)),
             "不同商品ID数": product_summary.get("distinct_item_ids", 0),
             "商品区间数": product_summary.get("interval_count", 0),
             "当前商品ID": _item_id,
@@ -632,6 +691,8 @@ def process_room(room_dir):
         quality_records.append({"recording_id": recording_id, **quality})
         timing_records.append({"recording_id": recording_id, **timing})
         all_product_events.extend(product_events)
+        all_strict_product_events.extend(strict_product_events)
+        all_candidate_product_events.extend(candidate_product_events)
         all_product_intervals.extend(product_ivs)
 
         # 该段的弹幕单独CSV
@@ -676,6 +737,15 @@ def process_room(room_dir):
                                  "timing_evidence": timing,
                                  "response_attribution_summary": attribution_summary,
                                  "product_event_summary": product_summary})
+        analysis_entry = write_recording_analysis(
+            sess_dir, recording_id=recording_id,
+            segment_index=data.get("segment_index", fi + 1),
+            run_id=data.get("run_id"), live_id=live_id, quality=quality, timing=timing,
+            events=product_events, strict_events=strict_product_events,
+            candidate_events=candidate_product_events, intervals=product_ivs,
+            raw_evidence=archive_entries[fi], video_evidence=entry)
+        recording_analysis.append(analysis_entry)
+        archive_segments[-1]["recording_analysis"] = analysis_entry
         print(f"    📹 第{fi+1}段: {duration:.1f}秒，SHA256 校验通过")
 
     # 汇总CSV
@@ -729,6 +799,8 @@ def process_room(room_dir):
     sess_dir = os.path.join(SESSIONS, pair_str)
     os.makedirs(sess_dir, exist_ok=True)
     product_events_path = Path(sess_dir) / "product_events.jsonl"
+    product_events_strict_path = Path(sess_dir) / "product_events_strict.jsonl"
+    product_events_candidate_path = Path(sess_dir) / "product_events_candidate.jsonl"
     product_intervals_path = Path(sess_dir) / "product_intervals.jsonl"
     quality_path = Path(sess_dir) / "recording_quality.json"
     timing_path = Path(sess_dir) / "timing_evidence.json"
@@ -753,7 +825,7 @@ def process_room(room_dir):
                                 for item in timing_records),
         "note": "墙钟、媒体 PTS 与接口接收时间分别记录；未估计的时延保持 null",
     }
-    product_summary = summarize_product_events(all_product_events, all_product_intervals)
+    product_summary = summarize_event_sets(all_product_events, all_product_intervals)
     attribution_totals = {"matched": 0, "context_only": 0, "conflict": 0, "unknown": 0,
                           "missing_status_count": 0}
     for segment in archive_segments:
@@ -770,17 +842,22 @@ def process_room(room_dir):
     if not rows or not os.path.isfile(sp) or len(archive_entries) != 2 * len(files):
         raise ValueError("归档文件不完整")
     write_derived_jsonl(product_events_path, all_product_events)
+    write_derived_jsonl(product_events_strict_path, all_strict_product_events)
+    write_derived_jsonl(product_events_candidate_path, all_candidate_product_events)
     write_derived_jsonl(product_intervals_path, all_product_intervals)
     write_derived_json(quality_path, {"schema_version": 1, "room_id": live_id,
                                       "recordings": quality_records, "summary": quality_summary})
     write_derived_json(timing_path, {"schema_version": 1, "room_id": live_id,
                                      "recordings": timing_records, "summary": timing_summary})
     analysis_files = [file_evidence(path) for path in
-                      (product_events_path, product_intervals_path, quality_path, timing_path)]
+                      (product_events_path, product_events_strict_path,
+                       product_events_candidate_path, product_intervals_path,
+                       quality_path, timing_path)]
     atomic_json(os.path.join(sess_dir, "archive_manifest.json"),
                 {"schema_version": 2, "room_id": live_id, "segment_count": len(files), "entries": archive_entries,
                  "segments": archive_segments, "summary": file_evidence(sp),
                  "analysis_files": analysis_files,
+                 "recording_analysis": recording_analysis,
                  "analysis_summary": {"recording_quality": quality_summary,
                                       "timing_evidence": timing_summary,
                                       "product_events": product_summary,

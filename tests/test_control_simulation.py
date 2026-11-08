@@ -414,7 +414,7 @@ class Checks(unittest.TestCase):
         def remove_archive_paths(value):
             if isinstance(value, dict):
                 return {key: remove_archive_paths(item) for key, item in value.items()
-                        if key not in ("source", "destination")}
+                        if key not in ("source", "destination", "directory", "recording_analysis")}
             if isinstance(value, list):
                 return [remove_archive_paths(item) for item in value]
             return value

@@ -9,7 +9,7 @@ import time
 
 from src.utils.digital_flags import (find_values_by_key, parse_json_body,
                                     summarize_digital_flags, title_keywords_in_values)
-from src.utils.safe_io import digest, probe_video
+from src.utils.safe_io import digest, iter_jsonl, probe_video
 
 
 def number(value):
@@ -333,6 +333,76 @@ def inspect_archive(manifest_path, ffprobe, cache=None):
     if (len(segment_ids) != len(segments) or any(not item for item in segment_ids)
             or len(segment_ids) != len(set(segment_ids))):
         return room_id, records, observations, ["归档段录制标识缺失或重复"]
+    analysis_entries = manifest.get("recording_analysis")
+    analysis_by_id = {}
+    if analysis_entries is not None:
+        if not isinstance(analysis_entries, list):
+            return room_id, records, observations, ["逐录制分析索引格式无效"]
+        for entry in analysis_entries:
+            if not isinstance(entry, dict) or not entry.get("recording_id"):
+                return room_id, records, observations, ["逐录制分析索引缺少录制标识"]
+            key = str(entry["recording_id"])
+            if key in analysis_by_id:
+                return room_id, records, observations, ["逐录制分析索引存在重复录制标识"]
+            analysis_by_id[key] = entry
+        if set(analysis_by_id) != {str(item) for item in segment_ids}:
+            return room_id, records, observations, ["逐录制分析索引与归档段不一致"]
+
+    def verify_analysis(entry, segment_item, recording_id, raw, video):
+        manifest_path = checked_file(entry.get("manifest"))
+        with manifest_path.open(encoding="utf-8") as stream:
+            analysis = json.load(stream)
+        if not isinstance(analysis, dict) or analysis.get("schema_version") != 1:
+            raise ValueError("逐录制分析清单格式无效")
+        if str(analysis.get("recording_id")) != recording_id:
+            raise ValueError("逐录制分析清单标识与录制段不一致")
+        if analysis.get("segment_index") != segment_item.get("segment_index"):
+            raise ValueError("逐录制分析清单段号与录制段不一致")
+        if str(analysis.get("live_id")) != str(room_id):
+            raise ValueError("逐录制分析清单直播间标识不一致")
+        files = analysis.get("files")
+        required = {"raw_json", "video", "product_events", "product_events_strict",
+                    "product_events_candidate", "product_intervals",
+                    "recording_quality", "timing_evidence"}
+        if not isinstance(files, dict) or not required.issubset(files):
+            raise ValueError("逐录制分析清单缺少必要文件")
+        checked = {name: checked_file(evidence) for name, evidence in files.items()}
+        for name, expected in (("raw_json", segment_item.get("raw_json")),
+                               ("video", segment_item.get("video"))):
+            evidence = files.get(name) or {}
+            if (Path(evidence.get("destination", "")).resolve() != Path(expected.get("destination", "")).resolve()
+                    or evidence.get("sha256") != expected.get("sha256")
+                    or evidence.get("bytes") != expected.get("bytes")):
+                raise ValueError("逐录制分析清单与归档 JSON/视频凭据不一致")
+        quality = json.loads(checked["recording_quality"].read_text(encoding="utf-8"))
+        if str(quality.get("recording_id")) != recording_id:
+            raise ValueError("录制质量文件与录制标识不一致")
+        timing = json.loads(checked["timing_evidence"].read_text(encoding="utf-8"))
+        if str(timing.get("recording_id")) != recording_id:
+            raise ValueError("时间证据文件与录制标识不一致")
+        for name in ("product_events", "product_events_strict",
+                     "product_events_candidate", "product_intervals"):
+            for row in iter_jsonl(checked[name]):
+                if str(row.get("recording_id")) != recording_id:
+                    raise ValueError(f"{name} 含其他录制的记录")
+                if row.get("live_id") is not None and str(row.get("live_id")) != str(room_id):
+                    raise ValueError(f"{name} 含其他直播间的记录")
+        for name, expected_status in (("product_events_strict", "matched"),
+                                      ("product_events_candidate", "context_only")):
+            for row in iter_jsonl(checked[name]):
+                if row.get("attribution_status") != expected_status:
+                    raise ValueError(f"{name} 归属等级不匹配")
+        return True
+
+    legacy_analysis_files = manifest.get("analysis_files")
+    if legacy_analysis_files is not None:
+        try:
+            if not isinstance(legacy_analysis_files, list):
+                raise ValueError("分析文件凭据格式无效")
+            for entry in legacy_analysis_files:
+                checked_file(entry)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return room_id, records, observations, [str(error)]
     for item in segments:
         recording_id = str(item["recording_id"])
         try:
@@ -348,6 +418,8 @@ def inspect_archive(manifest_path, ffprobe, cache=None):
             if (not isinstance(source_files, list) or len(source_files) != 1
                     or Path(source_files[0]).resolve() != Path(item["video"]["source"]).resolve()):
                 raise ValueError("原始 JSON 未明确对应归档视频来源")
+            if analysis_entries is not None:
+                verify_analysis(analysis_by_id[recording_id], item, recording_id, raw, video)
             duration = cache.get(video, "duration:" + str(ffprobe), lambda path: probe_video(path, ffprobe))
             if (not math.isfinite(duration) or duration < minimum_duration(data)
                     or number(item.get("duration_seconds")) is None

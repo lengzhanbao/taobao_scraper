@@ -17,7 +17,8 @@ from src.utils.segment_evidence import (DigitalObservationCollector, digital_obs
 from src.utils.runtime_options import read_runtime_options
 from src.crawler.response_attribution import normalize_attribution_status
 from src.parser.product_events import (CURRENT_ROLES, extract_product_events,
-                                       product_intervals, summarize_product_events)
+                                       product_intervals, split_event_sets,
+                                       summarize_event_sets)
 
 
 _SECRET_QUERY = re.compile(r"(?i)([?&](?:token|access_token|auth[_-]?key|sign|signature|secret|sid|key|session|ticket)=)[^&#\s]+")
@@ -185,10 +186,10 @@ def _journal_evidence(path, *, live_id, run_id, recording_id, segment_index, sta
     if legacy_current:
         legacy_timeline.append(dict(legacy_current, start_sec=round(legacy_start, 1),
                                     end_sec=round(max(0.0, end_t - start_t), 1)))
-    intervals = product_intervals(events)
-    current_events = [event for event in events
-                      if event.get("attribution_status") == "matched"
-                      and event.get("item_role") in CURRENT_ROLES]
+    strict_events, candidate_events = split_event_sets(events)
+    intervals = product_intervals(strict_events)
+    current_events = [event for event in strict_events
+                      if event.get("item_role") in CURRENT_ROLES]
     if current_events:
         # Price evidence stays at event level in product_events.jsonl; an
         # interval only proves the observed current-item boundaries.
@@ -208,9 +209,11 @@ def _journal_evidence(path, *, live_id, run_id, recording_id, segment_index, sta
         "journal_sha256": checksum.hexdigest(),
         "digital_observation": collector.result(),
         "product_events": events,
+        "strict_events": strict_events,
+        "candidate_events": candidate_events,
         "product_intervals": intervals,
         "product_timeline": timeline,
-        "product_event_summary": summarize_product_events(events, intervals),
+        "product_event_summary": summarize_event_sets(events, intervals),
         "response_attribution_summary": {
             "schema_version": 1, "total": captured, "by_status": status_counts,
             "by_api": api_counts, "missing_status_count": missing_status,
@@ -231,15 +234,21 @@ def _raw_json_lines(path):
 
 def _write_research_artifacts(attempt_dir, *, quality, timing, evidence):
     """Write small, citable artifacts next to the authoritative response journal."""
-    evidence = evidence or {"product_events": [], "product_intervals": []}
-    atomic_jsonl(Path(attempt_dir) / "product_events.jsonl", evidence.get("product_events", []))
-    atomic_jsonl(Path(attempt_dir) / "product_intervals.jsonl", evidence.get("product_intervals", []))
-    atomic_json(Path(attempt_dir) / "recording_quality.json", quality)
-    atomic_json(Path(attempt_dir) / "timing_evidence.json", timing)
-    return {"product_events": str(Path(attempt_dir) / "product_events.jsonl"),
-            "product_intervals": str(Path(attempt_dir) / "product_intervals.jsonl"),
-            "recording_quality": str(Path(attempt_dir) / "recording_quality.json"),
-            "timing_evidence": str(Path(attempt_dir) / "timing_evidence.json")}
+    evidence = evidence or {"product_events": [], "strict_events": [],
+                            "candidate_events": [], "product_intervals": []}
+    base = Path(attempt_dir)
+    atomic_jsonl(base / "product_events.jsonl", evidence.get("product_events", []))
+    atomic_jsonl(base / "product_events_strict.jsonl", evidence.get("strict_events", []))
+    atomic_jsonl(base / "product_events_candidate.jsonl", evidence.get("candidate_events", []))
+    atomic_jsonl(base / "product_intervals.jsonl", evidence.get("product_intervals", []))
+    atomic_json(base / "recording_quality.json", quality)
+    atomic_json(base / "timing_evidence.json", timing)
+    return {"product_events": str(base / "product_events.jsonl"),
+            "product_events_strict": str(base / "product_events_strict.jsonl"),
+            "product_events_candidate": str(base / "product_events_candidate.jsonl"),
+            "product_intervals": str(base / "product_intervals.jsonl"),
+            "recording_quality": str(base / "recording_quality.json"),
+            "timing_evidence": str(base / "timing_evidence.json")}
 
 
 def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_name,
@@ -522,6 +531,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "response_attribution_summary": evidence["response_attribution_summary"],
             "product_event_summary": evidence["product_event_summary"],
             "product_events_journal": artifacts["product_events"],
+            "product_events_strict_journal": artifacts["product_events_strict"],
+            "product_events_candidate_journal": artifacts["product_events_candidate"],
             "product_intervals_journal": artifacts["product_intervals"],
             "recording_quality": quality,
             "timing_evidence": timing,
@@ -588,6 +599,8 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "product_event_summary": (evidence["product_event_summary"]
                                       if evidence else None),
             "product_events_journal": artifacts.get("product_events"),
+            "product_events_strict_journal": artifacts.get("product_events_strict"),
+            "product_events_candidate_journal": artifacts.get("product_events_candidate"),
             "product_intervals_journal": artifacts.get("product_intervals"),
             "artifact_error": artifact_error,
         }
