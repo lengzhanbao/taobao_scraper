@@ -1,0 +1,52 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        shell: python
+        run: |
+          import os, re, pathlib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          version = tag.lstrip("v")
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)"
+          match = re.search(pattern, changelog, flags=re.M | re.S)
+          notes_path = pathlib.Path("release_notes.md")
+          if match and match.group(1).strip():
+              notes_path.write_text(match.group(1).strip() + "\n", encoding="utf-8")
+              has_notes = "true"
+          else:
+              has_notes = "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"has_notes={has_notes}\n")
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          HAS_NOTES: ${{ steps.notes.outputs.has_notes }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+          if [ "$HAS_NOTES" = "true" ]; then
+            gh release create "$TAG" --title "Taobao Live Scraper $TAG" --notes-file release_notes.md
+          else
+            gh release create "$TAG" --title "Taobao Live Scraper $TAG" --generate-notes
+          fi

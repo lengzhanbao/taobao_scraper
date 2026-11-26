@@ -1,5 +1,6 @@
 # Taobao Live Scraper / 淘宝直播爬虫
 
+[![Release](https://img.shields.io/badge/release-v2.8.1-orange.svg)](https://github.com/lengzhanbao/taobao_scraper/releases)
 [![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/lengzhanbao/taobao_scraper.svg)](https://github.com/lengzhanbao/taobao_scraper/stargazers)
@@ -12,13 +13,13 @@
 
 ## 📖 简介
 
-当前控制台版本：2.8.0。在保留原有采集、归档与恢复能力的基础上，新增录制质量三分解（技术有效 / 目标时长达成 / 音视频事实）、商品事件与商品区间、响应归属等级、时间证据和采集尝试台账；录制参数仍支持全局默认、实例覆盖、JSON 预览导入/导出及每次运行快照，保存后于下次启动生效。
+当前控制台版本：**2.8.1**。在保留原有采集、归档与恢复能力的基础上，提供录制质量三分解（技术有效 / 目标时长达成 / 音视频事实）、商品事件与商品区间、响应归属等级、时间证据和采集尝试台账；2.8.1 进一步升级了本地控制台视觉与交互动效，并修复了 FIFO 调度、2.8 启动对账兼容、跨房商品归属、Windows 原子写盘与大样本面板轮询性能问题。
 
 **Taobao Live Scraper** 是一个专业的淘宝直播数据采集工具，专注于数字人直播间的监控、录制和分析。
 
 ### 核心功能
 
-**本地采集控制台（2.8.0）**：在本机网页管理最多 5 个 Edge 采集实例、直播网址清单、录制参数、进度、环境检查和运行日志。支持参数 JSON 配置与运行快照；修改保存后下次启动生效。控制台仅监听本机回环地址；只有点击“启动采集”后才启动采集任务。详见 [控制台使用说明](docs/control-panel.md)。
+**本地采集控制台（2.8.1）**：在本机网页管理最多 5 个 Edge 采集实例、直播网址清单、录制参数、进度、环境检查和运行日志。采用毛玻璃粘性顶栏、深色终端日志框、运行态呼吸脉冲与通道流动状态条等交互动效；支持参数 JSON 配置与运行快照；修改保存后下次启动生效。控制台仅监听本机回环地址；只有点击“启动采集”后才启动采集任务。详见 [控制台使用说明](docs/control-panel.md)。
 
 ✅ **多实例并行录制** - 5个独立浏览器实例，同时监控不同直播间  
 ✅ **智能数字人检测** - 自动识别数字人主播直播间  
