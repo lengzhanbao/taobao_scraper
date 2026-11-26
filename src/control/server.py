@@ -283,6 +283,16 @@ def load_json(path, fallback):
         return fallback
 
 
+_KERNEL32 = None
+if os.name == "nt":
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _KERNEL32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    _KERNEL32.OpenProcess.restype = ctypes.c_void_p
+    _KERNEL32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
+    _KERNEL32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+
 def process_birth(pid):
     """Windows creation time identifies the same process even after a panel restart."""
     if os.name != "nt":
@@ -291,12 +301,7 @@ def process_birth(pid):
             return str(pid)
         except OSError:
             return None
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-    kernel.OpenProcess.restype = ctypes.c_void_p
-    kernel.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
-    kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel = _KERNEL32
     handle = kernel.OpenProcess(0x1000, False, pid)
     if not handle:
         return None
@@ -561,7 +566,7 @@ class Manager:
                                  '更正值从下一次启动生效。')
             return result
 
-    def url_rows(self, instance, config=None, snapshot=None):
+    def url_rows(self, instance, config=None, snapshot=None, *, corrections=None):
         config = config or self.settings
         source = snapshot or Path(config["study_root"]) / "_config" / instance["urls_file"]
         rows = read_url_list(source, instance["segments"])
@@ -574,7 +579,10 @@ class Manager:
             self._progress_parse_cache, qualities)
         archive_bundle = self.archive_bundle(config["study_root"], config["ffprobe"])
         archive_records = archive_bundle["records"]
-        corrections = read_count_corrections(config["study_root"]) if snapshot is None else {}
+        if snapshot is not None:
+            corrections = {}
+        elif corrections is None:
+            corrections = read_count_corrections(config["study_root"])
         for row in rows:
             live_id = row["live_id"]
             progress_entry = progress.get("rooms", {}).get(live_id, {}) if isinstance(progress, dict) else {}
@@ -658,10 +666,18 @@ class Manager:
         return rows
 
     def jobs(self):
+        for pid in list(self.children):
+            proc = self.children.get(pid)
+            if proc is not None and proc.poll() is not None:
+                self.children.pop(pid, None)
         jobs = []
         run_dir = self._run_dir()
         run_id = self.run.get("run_id")
         store = self._operation_store() if run_id else None
+        all_requests = store.list_requests(run_id) if store else []
+        requests_by_instance = {}
+        for row in all_requests:
+            requests_by_instance.setdefault(row.get("instance_id"), []).append(row)
         for job in self.run.get("jobs", []):
             status = load_json(job.get("status_file", ""), {})
             alive = bool(job.get("birth") and process_birth(job["pid"]) == job["birth"])
@@ -671,8 +687,7 @@ class Manager:
             operation_rows = []
             if store:
                 operation_rows = [self._operation_view(row, store, run_dir, job)
-                                  for row in store.list_requests(run_id)
-                                  if row.get("instance_id") == job.get("instance_id")]
+                                  for row in requests_by_instance.get(job.get("instance_id"), [])]
             last = operation_rows[-1] if operation_rows else None
             pending_pause = (last and last.get("operation") in ("pause", "resume")
                              and last.get("status") in ("accepted", "pending", "timed_out"))
@@ -956,14 +971,16 @@ class Manager:
                 "worker_ack_at": receipt.get("ack_at") if matches else None,
                 "worker_details": receipt.get("details", {}) if matches else {}}
 
-    def reconcile_operations(self, run=None):
+    def reconcile_operations(self, run=None, *, jobs=None):
         run = run or self.run
         run_id = run.get("run_id")
         if not run_id:
-            return
+            return False
         store = self._operation_store(run)
         run_dir = self._run_dir(run)
-        if run_id == self.run.get("run_id"):
+        if jobs is not None:
+            jobs_by_id = {job["instance_id"]: job for job in jobs}
+        elif run_id == self.run.get("run_id"):
             jobs_by_id = {job["instance_id"]: job for job in self.jobs()}
         else:
             jobs_by_id = {}
@@ -972,6 +989,7 @@ class Manager:
                 alive = bool(job.get("birth") and process_birth(job["pid"]) == job["birth"])
                 jobs_by_id[job["instance_id"]] = dict(job, alive=alive, status=status_data)
         now = time.time()
+        changed = False
         for request in store.list_requests(run_id):
             status = request.get("status")
             receipt = store.get_worker_receipt(run_dir, request["instance_id"], request["operation_id"])
@@ -980,6 +998,7 @@ class Manager:
                 if ack_status in ("applied", "failed", "superseded") and status != ack_status:
                     store.update_request(request["instance_id"], request["operation_id"], ack_status,
                                          detail=receipt.get("details", {}).get("message"))
+                    changed = True
                 continue
             if status not in ("accepted", "pending"):
                 continue
@@ -988,6 +1007,7 @@ class Manager:
                 failed = store.update_request(request["instance_id"], request["operation_id"], "failed",
                                               detail="worker exited before acknowledgment")
                 if failed:
+                    changed = True
                     self._emit_event(run_id, request["instance_id"], status="failed", source="controller",
                                      operation_id=request["operation_id"], details={"error": failed.get("detail")})
                 continue
@@ -997,8 +1017,10 @@ class Manager:
                 timed_out = store.update_request(request["instance_id"], request["operation_id"], "timed_out",
                                                  detail="尚未收到 worker 确认；命令仍有效，不自动重发")
                 if timed_out:
+                    changed = True
                     self._emit_event(run_id, request["instance_id"], status="timed_out", source="controller",
                                      operation_id=request["operation_id"], details={"age_seconds": int(age)})
+        return changed
 
     def operation_list(self, run_id):
         run_dir = self._run_dir({"run_id": run_id})
@@ -1093,12 +1115,14 @@ class Manager:
 
     def state(self):
         with self.lock:
-            self.reconcile_operations()
             totals = {"rooms": 0, "completed_rooms": 0, "recorded_segments": 0,
                       "remaining_segments": 0, "valid_segments": 0, "archived_segments": 0}
             instances = []
             distinct = {}
             jobs = self.jobs()
+            if self.reconcile_operations(jobs=jobs):
+                jobs = self.jobs()
+            corrections = read_count_corrections(self.settings["study_root"])
             for instance in self.settings["instances"]:
                 job = next((j for j in jobs if j["instance_id"] == instance["id"] and j["alive"]), None)
                 if job:
@@ -1106,7 +1130,7 @@ class Manager:
                     running_instance = next(i for i in config["instances"] if i["id"] == instance["id"])
                     rows = self.url_rows(running_instance, config, job["urls_file"])
                 else:
-                    rows = self.url_rows(instance)
+                    rows = self.url_rows(instance, corrections=corrections)
                 instances.append(dict(instance, **summarize_rows(rows),
                                       progress_source="本次运行" if job else "当前设置"))
                 if instance["enabled"] or job:
@@ -1241,8 +1265,10 @@ def handler_for(manager, token, expected_origin):
                     or not secrets.compare_digest(self.headers.get("X-Control-Token", ""), token)):
                 return self.reply(403, {"error": "请求来源无效"})
             try:
+                path = urlparse(self.path).path
+                max_length = 131072 if path == "/api/urls" else 64000
                 length = int(self.headers.get("Content-Length", "0"))
-                if not 0 < length <= 64000:
+                if not 0 < length <= max_length:
                     raise ValueError("请求大小无效")
                 body = json.loads(self.rfile.read(length))
                 actions = {"/api/settings": lambda: manager.save(body),
@@ -1255,9 +1281,9 @@ def handler_for(manager, token, expected_origin):
                                                                       body.get("operation_id"))
                 actions['/api/urls'] = lambda: manager.save_urls(body)
                 actions['/api/urls/correct-count'] = lambda: manager.correct_url_count(body)
-                if self.path not in actions:
+                if path not in actions:
                     return self.reply(404, {"error": "操作不存在"})
-                return self.reply(200, actions[self.path]())
+                return self.reply(200, actions[path]())
             except Exception as error:
                 return self.reply(400, {"error": str(error)})
 

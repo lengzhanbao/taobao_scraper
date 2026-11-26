@@ -20,7 +20,6 @@ if hasattr(sys.stderr, "reconfigure"):
 
 DELAY = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
-import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import (
     STUDY_ROOT, FFMPEG, FFPROBE, EDGE_PATH,
@@ -29,7 +28,8 @@ from src.utils.config import (
 )
 from src.utils.api_names import api_name
 from pathlib import Path
-from src.utils.safe_io import atomic_json, probe_video, PortLock, digest
+from src.utils.safe_io import (_cleanup_temp, _replace_with_retry, atomic_json,
+                               probe_video, PortLock, digest)
 from src.control.event_store import EventWriter
 from src.utils.segment_evidence import recording_quality, validation_matches
 from src.utils.runtime_options import read_runtime_options
@@ -235,12 +235,6 @@ state["sink_lock"] = sink_lock
 BODY_PREVIEW_CHARS = 800000
 
 
-# 控制台编码兜底：输出重定向到文件时 Python 会退回 GBK，emoji 日志会崩
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
 def log(m):
     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}]| {m}", flush=True)
 
@@ -300,7 +294,8 @@ def refresh_login():
         if not os.path.exists(COOKIE_JSON):
             log("  ❌ 无保存的 Cookie 文件，请手动登录")
             return False
-        saved = json.load(open(COOKIE_JSON, encoding="utf-8"))
+        with open(COOKIE_JSON, encoding="utf-8") as cookie_file:
+            saved = json.load(cookie_file)
         page.set.cookies(saved)
         page.refresh()
         time.sleep(3)
@@ -423,23 +418,24 @@ def read_urls():
     if not os.path.exists(URLS_FILE):
         return []
     out = []
-    for line in open(URLS_FILE, encoding="utf-8"):
-        raw = line.strip()
-        if not raw or raw.startswith("#"):
-            continue
-        m = re.search(r"liveId=(\d+)", raw)
-        if not m:
-            continue
-        lid = m.group(1)
-        clean = f"https://tbzb.taobao.com/live?liveId={lid}"
-        m2 = re.search(r"已录制(\d+)/(\d+)", raw)
-        if m2:
-            count = int(m2.group(1))
-            total = MAX_ROUND if MAX_ROUND_OVERRIDE else int(m2.group(2))
-        else:
-            count = 0
-            total = MAX_ROUND
-        out.append((clean, lid, count, total))
+    with open(URLS_FILE, encoding="utf-8") as url_stream:
+        for line in url_stream:
+            raw = line.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            m = re.search(r"liveId=(\d+)", raw)
+            if not m:
+                continue
+            lid = m.group(1)
+            clean = f"https://tbzb.taobao.com/live?liveId={lid}"
+            m2 = re.search(r"已录制(\d+)/(\d+)", raw)
+            if m2:
+                count = int(m2.group(1))
+                total = MAX_ROUND if MAX_ROUND_OVERRIDE else int(m2.group(2))
+            else:
+                count = 0
+                total = MAX_ROUND
+            out.append((clean, lid, count, total))
     return out
 
 
@@ -654,7 +650,8 @@ def validation_receipt(room_dir, segment_index):
 def mark_recorded(lid, count, total, room_dir=None):
     """更新 urls 计数：先每日备份一次，再原子写入（临时文件+os.replace），防崩溃损坏"""
     path = URLS_FILE
-    lines = open(path, encoding="utf-8").readlines()
+    with open(path, encoding="utf-8") as url_file:
+        lines = url_file.readlines()
     tag = f"已录制{count}/{total}"
     for i, line in enumerate(lines):
         match = re.search(r"liveId=(\d+)\b", line)
@@ -673,10 +670,16 @@ def mark_recorded(lid, count, total, room_dir=None):
             shutil.copy2(path, bak)
         except Exception:
             pass
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    os.replace(tmp, path)
+    tmp = Path(path + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as f:
+            f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_with_retry(tmp, Path(path))
+    except Exception:
+        _cleanup_temp(tmp)
+        raise
     progress_path = os.environ.get("LIVE_PROGRESS_FILE")
     if progress_path:
         progress = {}
@@ -871,11 +874,13 @@ for url, lid, count, total in url_pool:
             for f in files:
                 if f.endswith("_final.json"):
                     try:
-                        data = json.load(open(os.path.join(root, f)))
+                        with open(os.path.join(root, f), encoding="utf-8") as final_file:
+                            data = json.load(final_file)
                         t = data.get("record_start_t", 0)
                         if t > latest_t:
                             latest_t = t
-                    except: pass
+                    except Exception:
+                        pass
         if latest_t > 0:
             last_record[lid] = latest_t
 log(f"恢复 {len(last_record)} 个房间的录制时间")
@@ -965,30 +970,38 @@ while True:
             hot.append((url, lid, count, total))
         else:
             cold.append((url, lid, count, total))
-    # FIFO: 已录房间按录制时间排序，最早录的先（先进先出）
+    # FIFO: 已录房间按录制时间排序，最早录的先（先进先出）；新房间随机抽取
     hot.sort(key=lambda x: last_record.get(x[1], 0))
     candidates = hot if hot else cold
     if len(hot) > 0:
-        log(f"  优先 {len(hot)}个已录房间冷却完成")
+        log(f"  优先 {len(hot)}个已录房间冷却完成（FIFO）")
 
     if not candidates:
-        wait = 60
-        times = [last_record.get(lid, 0) for _, lid, c, t in url_pool if c < t]
-        if times:
-            earliest = min(times) + COOLDOWN_SEC - now
-            if earliest > 0:
-                wait = min(earliest, 60)
-        # 检查是否都满了
-        if not times:
-            remaining = sum(1 for _, _, c, t in url_pool if c < t)
-            if remaining == 0:
-                log("🎉 本实例所有房间已录满")
-                natural_finished = True
-                break
+        remaining_rooms = [(url, lid, c, t) for url, lid, c, t in url_pool if c < t]
+        if not remaining_rooms:
+            log("🎉 本实例所有房间已录满")
+            natural_finished = True
+            break
+        wait_candidates = []
+        all_exhausted = True
+        for _, lid, _, _ in remaining_rooms:
+            retry_ok, retry_wait = retry_state.eligible(lid, now)
+            if not retry_ok and retry_wait is None:
+                continue
+            all_exhausted = False
+            cooldown_wait = max(0, last_record.get(lid, 0) + COOLDOWN_SEC - now)
+            need_wait = max(cooldown_wait, retry_wait or 0)
+            if need_wait > 0:
+                wait_candidates.append(need_wait)
+        if all_exhausted:
+            log("⚠️ 本实例剩余未满段房间均已达到失败上限，结束本轮扫描")
+            natural_finished = True
+            break
+        wait = min(min(wait_candidates), 60) if wait_candidates else 60
         interruptible_wait(wait)
         continue
 
-    url, lid, count, total = random.choice(candidates)
+    url, lid, count, total = hot[0] if hot else random.choice(cold)
     previous_lid = status_data.get("previous_room_id")
     room_switch = previous_lid is not None and str(previous_lid) != str(lid)
     if room_switch and RUNTIME["room_gap_seconds"]:

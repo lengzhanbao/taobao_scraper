@@ -106,11 +106,10 @@ def _event_grade(response, parsed, context_live_id):
     ids = [str(item) for item in (response.get("live_ids") or []) if item is not None]
     if not ids:
         ids = [str(item) for item in find_values_by_key(parsed, "liveId") if item is not None]
-    observed = response.get("observed_live_id")
-    if observed is None and len(set(ids)) == 1:
-        observed = ids[0]
-    return attribution_status(ids, observed if observed is not None else context_live_id,
-                              response.get("navigation_id"))
+    expected = context_live_id if context_live_id is not None else response.get("observed_live_id")
+    if expected is None and len(set(ids)) == 1:
+        expected = ids[0]
+    return attribution_status(ids, expected, response.get("navigation_id"))
 
 
 def _item_prices(item, evidence_path):
@@ -233,8 +232,8 @@ def extract_product_events(response, context):
         for index, item in enumerate(items):
             role, evidence = base_role, role_evidence
             if api.endswith("callback.query"):
-                marker = str(((item.get("itemExtData") or {})
-                              .get("smallCardItemType") or "")).lower()
+                ext_data = _json_object(item.get("itemExtData"))
+                marker = str(ext_data.get("smallCardItemType") or "").lower()
                 if "speak" not in marker:
                     if unique_current and request_speaking:
                         role, evidence = "current_candidate", "callback_request_speaking_item"

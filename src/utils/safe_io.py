@@ -6,7 +6,31 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 import uuid
+
+
+def _replace_with_retry(temp, path, retries=6):
+    """Retry transient Windows sharing violations during atomic file replacement."""
+    last_error = None
+    for attempt in range(retries):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError as error:
+            last_error = error
+            if os.name != "nt" or attempt + 1 >= retries:
+                break
+            time.sleep(0.02 * (attempt + 1))
+    raise last_error
+
+
+def _cleanup_temp(temp):
+    try:
+        if temp.exists():
+            temp.unlink()
+    except OSError:
+        pass
 
 
 def _finite_number(value):
@@ -34,11 +58,15 @@ def atomic_json(path, payload, backup=False):
     if backup and path.exists():
         shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
     temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    with temp.open("x", encoding="utf-8") as stream:
-        json.dump(payload, stream, ensure_ascii=False, indent=2)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("x", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_with_retry(temp, path)
+    except Exception:
+        _cleanup_temp(temp)
+        raise
 
 
 def digest(path):
@@ -49,11 +77,11 @@ def digest(path):
     return sha.hexdigest()
 
 
-def verified_copy(source, destination):
+def verified_copy(source, destination, *, source_sha256=None):
     """Never replace an existing different file; verify copied bytes and SHA256."""
     source, destination = Path(source), Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source_hash = digest(source)
+    source_hash = source_sha256 or digest(source)
     if destination.exists():
         if source.stat().st_size != destination.stat().st_size or digest(destination) != source_hash:
             raise ValueError("归档目标已存在且内容不同，保留两端文件：" + str(destination))
@@ -63,7 +91,7 @@ def verified_copy(source, destination):
         if source.stat().st_size != temp.stat().st_size or digest(temp) != source_hash:
             raise ValueError("复制校验失败，原文件和临时副本均保留：" + str(source))
         # Caller owns the archive port lock; there is no concurrent parser writer.
-        os.replace(temp, destination)
+        _replace_with_retry(temp, destination)
     return {"source": str(source), "destination": str(destination),
             "bytes": source.stat().st_size, "sha256": source_hash}
 
@@ -182,12 +210,16 @@ def atomic_jsonl(path, rows, backup=False):
     if backup and path.exists():
         shutil.copy2(path, path.with_name(path.name + ".bak_" + uuid.uuid4().hex))
     temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    with temp.open("x", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("x", encoding="utf-8") as stream:
+            for row in rows:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_with_retry(temp, path)
+    except Exception:
+        _cleanup_temp(temp)
+        raise
 
 
 def atomic_json_with_raw_array(path, fields, array_key, raw_items, backup=False):
@@ -203,29 +235,33 @@ def atomic_json_with_raw_array(path, fields, array_key, raw_items, backup=False)
     if not isinstance(fields, dict) or array_key in fields:
         raise ValueError("数组字段必须独立于普通字段")
     temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
-    with temp.open("x", encoding="utf-8") as stream:
-        encoded = json.dumps(fields, ensure_ascii=False, indent=2).rstrip()
-        if not encoded.endswith("}"):
-            raise ValueError("字段序列化结果无效")
-        body = encoded[:-1].rstrip()
-        stream.write(body)
-        if body.strip() != "{":
-            stream.write(",\n  ")
-        else:
-            stream.write("\n  ")
-        stream.write(json.dumps(array_key, ensure_ascii=False) + ": [")
-        first = True
-        for raw in raw_items:
-            text = str(raw).strip()
-            if not text:
-                continue
-            stream.write("\n    " if first else ",\n    ")
-            stream.write(text)
-            first = False
-        stream.write("\n  ]\n}\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
+    try:
+        with temp.open("x", encoding="utf-8") as stream:
+            encoded = json.dumps(fields, ensure_ascii=False, indent=2).rstrip()
+            if not encoded.endswith("}"):
+                raise ValueError("字段序列化结果无效")
+            body = encoded[:-1].rstrip()
+            stream.write(body)
+            if body.strip() != "{":
+                stream.write(",\n  ")
+            else:
+                stream.write("\n  ")
+            stream.write(json.dumps(array_key, ensure_ascii=False) + ": [")
+            first = True
+            for raw in raw_items:
+                text = str(raw).strip()
+                if not text:
+                    continue
+                stream.write("\n    " if first else ",\n    ")
+                stream.write(text)
+                first = False
+            stream.write("\n  ]\n}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_with_retry(temp, path)
+    except Exception:
+        _cleanup_temp(temp)
+        raise
 
 
 class PortLock:

@@ -1,6 +1,7 @@
 """Durable per-instance room failure cooldowns; fail closed on corrupt state."""
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -66,7 +67,13 @@ class RetryState:
         return raw
 
     def _save(self):
-        atomic_json(self.path, self.data, backup=self.path.exists())
+        # Keep one rolling previous snapshot instead of accumulating unbounded UUID backups.
+        if self.path.exists():
+            try:
+                shutil.copy2(self.path, self.path.with_name(self.path.name + ".bak"))
+            except OSError:
+                pass
+        atomic_json(self.path, self.data, backup=False)
 
     def entry(self, live_id):
         return dict(self.data["rooms"].get(str(live_id), {}))

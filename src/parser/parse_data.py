@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """淘宝直播数据解析 → sessions/<店铺>/crawler/ CSV"""
+import io
 import json, re, os, glob, csv, subprocess, shutil, sys
 
 # 控制台编码兜底：子进程管道输出默认 GBK，中文/emoji 会导致父进程 UTF-8 解码崩溃
@@ -8,10 +9,10 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.utils.config import STUDY_ROOT, FFPROBE
-from src.utils.safe_io import (atomic_json, atomic_jsonl, iter_jsonl, probe_media,
+from src.utils.safe_io import (_cleanup_temp, _replace_with_retry, atomic_json,
+                               atomic_jsonl, iter_jsonl, probe_media,
                                verified_copy, probe_video)
 from src.utils.segment_evidence import (digital_observation, file_evidence,
                                         recording_quality, timing_evidence,
@@ -101,14 +102,16 @@ def write_csv(path, rows, fieldnames, overwrite=False):
     existing_tags = set()
     if not overwrite and os.path.exists(path):
         try:
-            for r in csv.DictReader(open(path, encoding="utf-8-sig")):
-                tag = r.get("录制编号", "")
-                if not tag:
-                    existing.append(r)  # 弹幕等无录制编号，直接保留
-                elif tag not in existing_tags:
-                    existing.append(r)
-                    existing_tags.add(tag)
-        except: pass
+            with open(path, encoding="utf-8-sig") as existing_file:
+                for r in csv.DictReader(existing_file):
+                    tag = r.get("录制编号", "")
+                    if not tag:
+                        existing.append(r)  # 弹幕等无录制编号，直接保留
+                    elif tag not in existing_tags:
+                        existing.append(r)
+                        existing_tags.add(tag)
+        except Exception:
+            pass
     # 新行去重（仅对有录制编号的summary行）
     new_tags = set()
     deduped = []
@@ -120,13 +123,30 @@ def write_csv(path, rows, fieldnames, overwrite=False):
             deduped.append(r)
             new_tags.add(tag)
     all_rows = existing + deduped
-    if os.path.isfile(path):
-        shutil.copy2(path, path + ".bak_" + uuid.uuid4().hex)
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for r in all_rows:
-            w.writerow({k: r.get(k, "") for k in fieldnames})
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in all_rows:
+        writer.writerow({k: r.get(k, "") for k in fieldnames})
+    encoded = buf.getvalue().encode("utf-8-sig")
+    target = Path(path)
+    if target.is_file():
+        try:
+            if target.read_bytes() == encoded:
+                return
+        except OSError:
+            pass
+        shutil.copy2(target, target.with_name(target.name + ".bak_" + uuid.uuid4().hex))
+    temp = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with temp.open("xb") as f:
+            f.write(encoded)
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_with_retry(temp, target)
+    except Exception:
+        _cleanup_temp(temp)
+        raise
 
 def comment_capture_state(responses, row_count):
     """An empty captured comment list differs from no capture or parse failure."""
@@ -255,7 +275,9 @@ def segment_product_evidence(data, live_id, recording_id, segment_index, run_id,
                      and nonnegative_time(item.get("start_seconds"))]
     summary = data.get("product_event_summary")
     if (not isinstance(summary, dict) or summary.get("schema_version") != 1
-            or not isinstance(summary.get("event_sets"), dict)):
+            or not isinstance(summary.get("event_sets"), dict)
+            or summary.get("event_count") != len(events)
+            or summary.get("interval_count") != len(intervals)):
         summary = summarize_event_sets(events, intervals)
     return events, intervals, summary
 
@@ -344,19 +366,28 @@ def process_room(room_dir):
         for f in filenames:
             if f.startswith("data_") and f.endswith("_final.json"):
                 files.append(os.path.join(root, f))
-    def recording_order(path):
-        with open(path, encoding="utf-8") as stream:
+    loaded_meta = {}
+    for fp in files:
+        with open(fp, encoding="utf-8") as stream:
             metadata = json.load(stream)
-        return (metadata.get("segment_index", 0), metadata.get("record_start_t", 0), os.path.basename(path))
-    files.sort(key=recording_order)
+        loaded_meta[fp] = {
+            "segment_index": metadata.get("segment_index"),
+            "record_start_t": metadata.get("record_start_t", 0),
+            "recorded_files": metadata.get("recorded_files", []),
+            "max_minutes": metadata.get("max_minutes"),
+        }
+    files.sort(key=lambda path: (
+        loaded_meta[path]["segment_index"] if loaded_meta[path]["segment_index"] is not None else 0,
+        loaded_meta[path]["record_start_t"] or 0,
+        os.path.basename(path),
+    ))
     if not files:
         print("  无 _final.json")
         return False
     seen_indexes = set()
     measured = {}
     for fp in files:
-        with open(fp, encoding="utf-8") as stream:
-            metadata = json.load(stream)
+        metadata = loaded_meta[fp]
         index = metadata.get("segment_index")
         if index is not None:
             if index in seen_indexes:
@@ -372,23 +403,31 @@ def process_room(room_dir):
         measured[fp] = video_validation(source_video, metadata, FFPROBE, probe=probe_video,
                                         media_probe=probe_media)
 
-    # —— 从第一个文件提取店铺名 ——
-    first = json.load(open(files[0], encoding="utf-8"))
-    groups_tmp = {}
-    for c in segment_responses(first):
-        an = api_name(c.get("url", ""))
-        if an: groups_tmp.setdefault(an, []).append(c)
-    dc_tmp = groups_tmp.get("mtop.roomstudio.live.detail.get", [])
-    live_tmp = {}
-    for c in dc_tmp:
-        o = strip_jsonp(c.get("body"))
-        if not o: continue
-        for key in ["title","liveTitle","accountName","anchorName"]:
-            v = deep_find(o, key)
-            if v is not None and not live_tmp.get(key): live_tmp[key] = v
-    _title_tmp = live_tmp.get("title") or live_tmp.get("liveTitle") or ""
-    _anchor_tmp = live_tmp.get("accountName") or live_tmp.get("anchorName") or ""
+    # —— 从第一个文件提取店铺名（优先仅使用归属当前房间的响应，避免跨房残余污染目录名） ——
     live_id = os.path.basename(room_dir).replace("room_", "")
+    with open(files[0], encoding="utf-8") as first_stream:
+        first = json.load(first_stream)
+    first_responses = segment_responses(first)
+    def _extract_room_label(candidates):
+        live_tmp = {}
+        for c in candidates:
+            if api_name(c.get("url", "")) != "mtop.roomstudio.live.detail.get":
+                continue
+            o = strip_jsonp(c.get("body"))
+            if not o:
+                continue
+            for key in ["title", "liveTitle", "accountName", "anchorName"]:
+                v = deep_find(o, key)
+                if v is not None and not live_tmp.get(key):
+                    live_tmp[key] = v
+        return (live_tmp.get("title") or live_tmp.get("liveTitle") or "",
+                live_tmp.get("accountName") or live_tmp.get("anchorName") or "")
+    _title_tmp, _anchor_tmp = _extract_room_label(
+        [c for c in first_responses if response_for_room_analysis(c, live_id)])
+    if not (_title_tmp and _anchor_tmp):
+        fallback_title, fallback_anchor = _extract_room_label(first_responses)
+        _title_tmp = _title_tmp or fallback_title
+        _anchor_tmp = _anchor_tmp or fallback_anchor
     base_name = safe_name(_title_tmp + "_" + _anchor_tmp) if (_title_tmp and _anchor_tmp) else "unknown"
     pair_str = f"{base_name}_{live_id}"
 
@@ -417,7 +456,8 @@ def process_room(room_dir):
     recording_analysis = []
     for fi, fp in enumerate(copied):
         print(f"  段{fi+1}: {os.path.basename(fp)[:30]}...")
-        data = json.load(open(fp, encoding="utf-8"))
+        with open(fp, encoding="utf-8") as seg_stream:
+            data = json.load(seg_stream)
         responses = segment_responses(data)
 
         groups = {}
@@ -517,8 +557,8 @@ def process_room(room_dir):
             # old extraction only as a last-resort compatibility path.
             cq = groups.get("mtop.tblive.live.item.callback.query", [])
             if cq:
-                cq_parsed = [strip_jsonp(c.get("body", "")) for c in cq
-                             if strip_jsonp(c.get("body", ""))]
+                cq_parsed = [parsed for c in cq
+                             if (parsed := strip_jsonp(c.get("body", "")))]
                 if cq_parsed:
                     cil = deep_find(cq_parsed[-1], "curItemList") or []
                     if isinstance(cil, list) and cil:
@@ -532,8 +572,8 @@ def process_room(room_dir):
                             except: _live_promo_price = pp
             il = groups.get("mtop.tblive.live.item.getvideodetailitemlistwithpagination", [])
             if not _item_name and il:
-                il_parsed = [strip_jsonp(c.get("body", "")) for c in il
-                             if strip_jsonp(c.get("body", ""))]
+                il_parsed = [parsed for c in il
+                             if (parsed := strip_jsonp(c.get("body", "")))]
                 if il_parsed:
                     ilv1 = deep_find(il_parsed[-1], "itemListv1") or []
                     if isinstance(ilv1, list) and ilv1:
@@ -555,12 +595,19 @@ def process_room(room_dir):
             try:
                 start_fans = int(pt[0].get("fans", 0)) if pt[0].get("fans") else None
                 end_fans = int(pt[-1].get("fans", 0)) if pt[-1].get("fans") else None
-            except: pass
+            except Exception:
+                pass
         if start_fans is None and dc_parsed:
-            try:
-                start_fans = int(deep_find(dc_parsed[0], "fansNum"))
-                end_fans = int(deep_find(dc_parsed[-1], "fansNum"))
-            except: pass
+            fans_values = []
+            for o in dc_parsed:
+                raw_fans = deep_find(o, "fansNum")
+                if raw_fans is not None:
+                    try:
+                        fans_values.append(int(raw_fans))
+                    except (TypeError, ValueError):
+                        pass
+            if fans_values:
+                start_fans, end_fans = fans_values[0], fans_values[-1]
         new_fans = (end_fans - start_fans) if (isinstance(start_fans, int) and isinstance(end_fans, int)) else ""
 
         # 弹幕
@@ -719,7 +766,7 @@ def process_room(room_dir):
             raise ValueError("视频缺失或路径超出本房间，保留原始数据")
         duration = measured[files[fi]]["duration_seconds"]
         dst = os.path.join(vid_dir, f"{base_name}_video_第{fi+1}段.flv")
-        entry = verified_copy(src, dst)
+        entry = verified_copy(src, dst, source_sha256=measured[files[fi]]["video_sha256"])
         if entry["sha256"] != measured[files[fi]]["video_sha256"]:
             raise ValueError("视频在时长核验后发生变化，源文件与副本保留待核查")
         entry.update(segment_index=data.get("segment_index", fi + 1),

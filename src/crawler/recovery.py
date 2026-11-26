@@ -1,7 +1,6 @@
 """Conservative startup reconciliation for one room in one explicit run."""
+import hashlib
 import json
-import hashlib
-import hashlib
 import os
 import re
 import shutil
@@ -9,8 +8,21 @@ import time
 import uuid
 from pathlib import Path
 
-from src.utils.safe_io import PortLock, atomic_json, digest
-from src.utils.segment_evidence import validation_matches
+from src.utils.safe_io import PortLock, _replace_with_retry, atomic_json, digest
+from src.utils.segment_evidence import recording_quality, validation_matches
+
+
+_CORE_RECEIPT_KEYS = (
+    "segment_index", "recording_id", "final_json", "final_size", "final_mtime_ns",
+    "video_path", "video_size", "video_mtime_ns", "video_duration_seconds",
+    "validation_schema_version", "final_sha256", "video_sha256",
+)
+
+
+def _receipt_core_matches(saved, expected):
+    if not isinstance(saved, dict) or not isinstance(expected, dict):
+        return False
+    return all(saved.get(key) == expected.get(key) for key in _CORE_RECEIPT_KEYS)
 
 
 def _append_report(path, item):
@@ -26,16 +38,25 @@ def _append_report(path, item):
         lock.close()
 
 
-def _receipt(final_path, final, video_path):
+def _receipt(final_path, final, video_path, *, final_sha256=None, video_sha256=None):
     final_stat, video_stat = final_path.stat(), video_path.stat()
+    quality = final.get("recording_quality")
+    if not isinstance(quality, dict):
+        quality = recording_quality(final)
     return {"segment_index": int(final["segment_index"]),
             "recording_id": str(final["recording_id"]), "final_json": str(final_path.resolve()),
             "final_size": final_stat.st_size, "final_mtime_ns": final_stat.st_mtime_ns,
             "video_path": str(video_path.resolve()), "video_size": video_stat.st_size,
             "video_mtime_ns": video_stat.st_mtime_ns,
             "video_duration_seconds": float(final["video_duration_seconds"]),
-            "validation_schema_version": 1, "final_sha256": digest(final_path),
-            "video_sha256": digest(video_path)}
+            "validation_schema_version": 1,
+            "final_sha256": final_sha256 or digest(final_path),
+            "video_sha256": video_sha256 or digest(video_path),
+            "technical_valid": True,
+            "quality_state": quality.get("quality_state"),
+            "target_duration_met": quality.get("target_duration_met"),
+            "has_audio": quality.get("has_audio"),
+            "audio_duration_seconds": quality.get("audio_duration_seconds")}
 
 
 def _verified_backup(path, label):
@@ -129,7 +150,9 @@ def reconcile_room(*, urls_path, progress_path, staging_root, report_path, run_i
                 if not video.is_relative_to(room_dir.resolve()) or not video.is_file():
                     continue
                 proof_hash = final["technical_validation"].get("video_sha256")
-                if digest(video) != proof_hash:
+                video_before = video.stat()
+                video_sha = digest(video)
+                if video_sha != proof_hash:
                     continue
                 matching_saved = any(isinstance(item, dict)
                                     and item.get("recording_id") == final["recording_id"]
@@ -138,7 +161,8 @@ def reconcile_room(*, urls_path, progress_path, staging_root, report_path, run_i
                                            and progress_count == int(final["segment_index"])):
                     continue
                 valid.append((final_path.resolve(), final, video,
-                              hashlib.sha256(final_bytes).hexdigest()))
+                              hashlib.sha256(final_bytes).hexdigest(),
+                              video_sha, (video_before.st_size, video_before.st_mtime_ns)))
             except (OSError, ValueError, TypeError, KeyError, IndexError):
                 continue
         if len(valid) != 1:
@@ -148,12 +172,15 @@ def reconcile_room(*, urls_path, progress_path, staging_root, report_path, run_i
         if len(valid) != 1:
             return review("valid_final_evidence_missing_or_ambiguous", candidates=len(valid),
                           expected_segment_indices=sorted(possible_indices))
-        final_path, final, video, final_sha_at_read = valid[0]
+        final_path, final, video, final_sha_at_read, video_sha_at_read, video_sig = valid[0]
         expected_index = int(final["segment_index"])
-        evidence_receipt = _receipt(final_path, final, video)
-        if (evidence_receipt["final_sha256"] != final_sha_at_read
-                or digest(video) != final["technical_validation"].get("video_sha256")):
+        video_after = video.stat()
+        final_sha_now = digest(final_path)
+        if (final_sha_now != final_sha_at_read
+                or (video_after.st_size, video_after.st_mtime_ns) != video_sig):
             return review("evidence_changed_during_reconciliation")
+        evidence_receipt = _receipt(final_path, final, video,
+                                    final_sha256=final_sha_now, video_sha256=video_sha_at_read)
 
         if type(progress_count) is not int or progress_count not in (expected_index - 1, expected_index):
             return review("progress_count_conflict", progress_count=progress_count,
@@ -164,7 +191,7 @@ def reconcile_room(*, urls_path, progress_path, staging_root, report_path, run_i
             return review("progress_receipt_conflict", count=len(same_index))
         matching_receipt = next((item for item in existing if isinstance(item, dict)
                                  and item.get("recording_id") == final["recording_id"]), None)
-        if matching_receipt and matching_receipt != evidence_receipt:
+        if matching_receipt and not _receipt_core_matches(matching_receipt, evidence_receipt):
             return review("progress_receipt_evidence_mismatch")
 
         url_after = current_count == expected_index
@@ -205,7 +232,7 @@ def reconcile_room(*, urls_path, progress_path, staging_root, report_path, run_i
                 stream.writelines(lines)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temp, urls_path)
+            _replace_with_retry(temp, urls_path)
         if progress_write:
             segments = list(existing) if matching_receipt else list(existing) + [evidence_receipt]
             rooms[str(live_id)] = {"count": expected_index, "target": row_target,

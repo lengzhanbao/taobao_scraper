@@ -223,12 +223,13 @@ def _journal_evidence(path, *, live_id, run_id, recording_id, segment_index, sta
     }
 
 
-def _raw_json_lines(path):
-    """Yield validated JSON lines without retaining the journal in memory."""
+def _raw_json_lines(path, *, validate=True):
+    """Yield JSON lines without retaining the journal in memory."""
     with Path(path).open(encoding="utf-8") as stream:
         for line in stream:
             if line.strip():
-                json.loads(line)
+                if validate:
+                    json.loads(line)
                 yield line
 
 
@@ -394,10 +395,14 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             last_growth = time.monotonic()
             next_refresh = time.monotonic() + options["page_refresh_seconds"]
             next_checkpoint = time.monotonic() + options["checkpoint_seconds"]
+            next_status = 0.0
             while process.poll() is None:
                 elapsed = time.time() - start_t
-                publish_status("recording", elapsed_seconds=round(elapsed),
-                               remaining_seconds=max(0, round(max_minutes * 60 - elapsed)))
+                now_mono = time.monotonic()
+                if now_mono >= next_status:
+                    publish_status("recording", elapsed_seconds=round(elapsed),
+                                   remaining_seconds=max(0, round(max_minutes * 60 - elapsed)))
+                    next_status = now_mono + 4.0
                 if elapsed >= max_minutes * 60:
                     failure_stage = "duration_limit_reached"
                     break
@@ -538,7 +543,7 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
             "timing_evidence": timing,
         }
         atomic_json_with_raw_array(final_path, payload, "responses",
-                                   _raw_json_lines(journal_path))
+                                   _raw_json_lines(journal_path, validate=False))
         publish_status("segment_completed", video_duration_seconds=duration,
                        target_duration_met=quality["target_duration_met"],
                        has_audio=quality["has_audio"], quality_state=quality["quality_state"])
@@ -575,10 +580,20 @@ def record_segment(*, url, live_id, room_dir, stream_url, segment_index, seg_nam
                                              media_duration=duration)
             except (OSError, ValueError, TypeError):
                 evidence = None
+        probed_media = None
+        if (duration is None and video is not None and video.is_file()
+                and video.stat().st_size > 0):
+            try:
+                probed_media = probe_media(video, ffprobe)
+                if isinstance(probed_media, dict) and probed_media.get("duration_seconds") is not None:
+                    duration = probed_media["duration_seconds"]
+            except Exception:
+                probed_media = None
         failed_base = dict(base, video_duration_seconds=duration,
-                           technical_validation=validation)
+                           technical_validation=validation,
+                           media_facts=probed_media)
         quality = recording_quality(failed_base)
-        media = validation.get("media") if isinstance(validation, dict) else None
+        media = (validation.get("media") if isinstance(validation, dict) else None) or probed_media
         timing = timing_evidence(failed_base, media=media, events=record_events)
         try:
             artifacts = _write_research_artifacts(attempt_dir, quality=quality, timing=timing,

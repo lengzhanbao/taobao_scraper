@@ -1,15 +1,18 @@
 """Recording evidence and observations; never changes source recordings."""
+from collections import OrderedDict
+import copy
 import csv
 import datetime
 import json
 import math
 from pathlib import Path
 import subprocess
+import threading
 import time
 
 from src.utils.digital_flags import (find_values_by_key, parse_json_body,
                                     summarize_digital_flags, title_keywords_in_values)
-from src.utils.safe_io import digest, iter_jsonl, probe_video
+from src.utils.safe_io import digest, iter_jsonl, probe_media, probe_video
 
 
 def number(value):
@@ -44,7 +47,15 @@ def video_validation(video, data, ffprobe, probe=None, media_probe=None):
     recorded as unknown media facts instead of changing the validity decision.
     """
     before = Path(video).stat()
-    duration = (probe or probe_video)(video, ffprobe)
+    media = None
+    if media_probe is probe_media and probe in (None, probe_video):
+        media = probe_media(video, ffprobe)
+        duration = number(media.get("duration_seconds")) if isinstance(media, dict) else None
+        has_video = bool(media.get("has_video")) if isinstance(media, dict) else False
+        if duration is None or duration <= 0 or not has_video:
+            raise ValueError("视频没有有效时长或视频轨道")
+    else:
+        duration = (probe or probe_video)(video, ffprobe)
     minimum = minimum_duration(data)
     if not math.isfinite(duration) or duration < minimum:
         raise ValueError(f"实际视频时长 {duration:.1f} 秒，少于最低 {minimum:.1f} 秒")
@@ -56,10 +67,11 @@ def video_validation(video, data, ffprobe, probe=None, media_probe=None):
               "duration_seconds": duration, "minimum_duration_seconds": minimum,
               "video_sha256": checksum, "validated_t": time.time()}
     if media_probe is not None:
-        try:
-            media = media_probe(video, ffprobe)
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-            media = None
+        if media is None:
+            try:
+                media = media_probe(video, ffprobe)
+            except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+                media = None
         if isinstance(media, dict):
             result["media"] = media
         final = Path(video).stat()
@@ -274,24 +286,31 @@ def file_evidence(path):
 
 
 class EvidenceCache:
-    """Avoid rereading unchanged large videos at each dashboard refresh."""
-    def __init__(self):
-        self.values = {}
+    """Thread-safe LRU cache avoiding redundant reads of unchanged large files."""
+    def __init__(self, max_entries=4096):
+        self.values = OrderedDict()
+        self.max_entries = max(64, int(max_entries))
+        self._lock = threading.Lock()
 
     def get(self, path, kind, reader):
         path = Path(path).resolve()
         stat = path.stat()
         signature = (str(path), kind, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-        if signature not in self.values:
-            result = reader(path)
-            after = path.stat()
-            if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (
-                    after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                raise ValueError("核验期间文件发生变化")
-            if len(self.values) >= 4096:
-                self.values.clear()
+        with self._lock:
+            if signature in self.values:
+                self.values.move_to_end(signature)
+                return self.values[signature]
+        result = reader(path)
+        after = path.stat()
+        if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("核验期间文件发生变化")
+        with self._lock:
             self.values[signature] = result
-        return self.values[signature]
+            self.values.move_to_end(signature)
+            while len(self.values) > self.max_entries:
+                self.values.popitem(last=False)
+        return result
 
 
 def inspect_archive(manifest_path, ffprobe, cache=None):
@@ -380,17 +399,19 @@ def inspect_archive(manifest_path, ffprobe, cache=None):
         timing = json.loads(checked["timing_evidence"].read_text(encoding="utf-8"))
         if str(timing.get("recording_id")) != recording_id:
             raise ValueError("时间证据文件与录制标识不一致")
+        expected_statuses = {
+            "product_events_strict": "matched",
+            "product_events_candidate": "context_only",
+        }
         for name in ("product_events", "product_events_strict",
                      "product_events_candidate", "product_intervals"):
+            expected_status = expected_statuses.get(name)
             for row in iter_jsonl(checked[name]):
                 if str(row.get("recording_id")) != recording_id:
                     raise ValueError(f"{name} 含其他录制的记录")
                 if row.get("live_id") is not None and str(row.get("live_id")) != str(room_id):
                     raise ValueError(f"{name} 含其他直播间的记录")
-        for name, expected_status in (("product_events_strict", "matched"),
-                                      ("product_events_candidate", "context_only")):
-            for row in iter_jsonl(checked[name]):
-                if row.get("attribution_status") != expected_status:
+                if expected_status is not None and row.get("attribution_status") != expected_status:
                     raise ValueError(f"{name} 归属等级不匹配")
         return True
 
@@ -409,10 +430,24 @@ def inspect_archive(manifest_path, ffprobe, cache=None):
             raw = checked_file(item.get("raw_json"))
             video = checked_file(item.get("video"))
             comments = checked_file(item.get("comments"))
-            with raw.open(encoding="utf-8") as stream:
-                data = json.load(stream)
+            def _load_raw_summary(path):
+                with path.open(encoding="utf-8") as stream:
+                    raw_data = json.load(stream)
+                if not isinstance(raw_data, dict):
+                    raise ValueError("原始 JSON 格式无效")
+                return {
+                    "recording_id": raw_data.get("recording_id"),
+                    "segment_index": raw_data.get("segment_index"),
+                    "recorded_files": raw_data.get("recorded_files", []),
+                    "max_minutes": raw_data.get("max_minutes"),
+                    "digital_observation": digital_observation(raw_data, room_id),
+                }
+            data = cache.get(raw, f"archive_raw_summary:{room_id}", _load_raw_summary)
             expected_id = str(data.get("recording_id") or raw.name.removeprefix("data_").removesuffix("_final.json"))
-            if expected_id != recording_id or data.get("segment_index", item["segment_index"]) != item["segment_index"]:
+            raw_segment_index = data.get("segment_index")
+            if raw_segment_index is None:
+                raw_segment_index = item["segment_index"]
+            if expected_id != recording_id or raw_segment_index != item["segment_index"]:
                 raise ValueError("JSON 与视频录制标识/段号不对应")
             source_files = data.get("recorded_files", [])
             if (not isinstance(source_files, list) or len(source_files) != 1
@@ -438,7 +473,7 @@ def inspect_archive(manifest_path, ffprobe, cache=None):
             if len([row for row in summary_rows if row.get("录制唯一ID") == recording_id]) != 1:
                 raise ValueError("汇总中缺少对应录制段")
             records.add(recording_id)
-            observations[recording_id] = digital_observation(data, room_id)
+            observations[recording_id] = copy.deepcopy(data["digital_observation"])
         except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
             errors.append(f"{recording_id}: {error}")
     return room_id, records, observations, errors

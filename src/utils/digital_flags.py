@@ -110,6 +110,9 @@ def summarize_digital_flags(values):
     elif all_true:
         status = "all_true"
         raw_label = "true"
+    elif has_true:
+        status = "unknown"
+        raw_label = "true|unknown"
     else:
         status = "unknown"
         raw_label = "unknown" if normalized else "missing"
