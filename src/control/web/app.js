@@ -216,7 +216,14 @@ function renderAttempts() {
     tr.append(cell(Number.isInteger(row.instance_id)?"Edge "+row.instance_id:"—"));
     tr.append(cell(row.live_id||"—"));
     tr.append(cell(row.stage==="recording"?"录制":"扫描"));
-    tr.append(cell(attemptResultText(row)));
+    const resultCell=cell("");
+    const badge=document.createElement("span");
+    const tone=row.decision==="recorded"?" is-recorded":row.decision==="skipped_not_eligible"?" is-skipped":
+      String(row.decision||"").startsWith("failed")?" is-failed":"";
+    badge.className="attempt-badge"+tone;
+    badge.textContent=attemptResultText(row);
+    resultCell.append(badge);
+    tr.append(resultCell);
     const reason=cell(row.reason_text||"—");
     if(row.detail?.error)reason.title=String(row.detail.error);
     tr.append(reason);
@@ -260,7 +267,10 @@ async function refreshState() {
     throw error;
   }
   state=latest;token=state.token;refreshFailures=0;connectionLost=false;
-  settingsV27Supported=/^2\.(7|8)\./.test(state.version||"")&&Object.keys(fieldLabels).every(key=>
+  const versionParts=(state.version||"").match(/^(\d+)\.(\d+)/);
+  const major=versionParts?Number(versionParts[1]):0;
+  const minor=versionParts?Number(versionParts[2]):0;
+  settingsV27Supported=(major>2||(major===2&&minor>=7))&&Object.keys(fieldLabels).every(key=>
     state.runtime_fields?.[key]&&Object.prototype.hasOwnProperty.call(state.settings||{},key))&&
     state.settings.instances?.every(instance=>["max_minutes","cooldown_minutes","room_gap_seconds","page_refresh_seconds"].every(key=>Object.prototype.hasOwnProperty.call(instance,key)));
   $("settings-version-note").hidden=settingsV27Supported;
@@ -312,9 +322,6 @@ async function refreshState() {
   if(settingsV27Supported) $("run-summary").textContent=(activeJobs.length?"当前运行："+activeJobs.map(job=>"实例 "+job.instance_id+"（"+configSummary(job.actual_settings)+"）").join("；"):legacyActiveJobs.length?"当前运行："+legacyActiveJobs.map(job=>"实例 "+job.instance_id+"（旧版启动快照，新参数未知）").join("；"):"当前运行：无")+"。下次启动："+nextRunSummary(nextConfig)+"。估时不含直播可用性及失败重试影响。";
   $("code-root").textContent="版本目录："+state.code_root;
   $("version").textContent=state.version?"v"+state.version.split("-")[0]:"版本未知";
-  const versionParts=(state.version||"").match(/^(\d+)\.(\d+)/);
-  const major=versionParts?Number(versionParts[1]):0;
-  const minor=versionParts?Number(versionParts[2]):0;
   const urlSupported=major>2||(major===2&&minor>=3);
   const correctionSupported=major>2||(major===2&&minor>=5);
   for(const id of ["url-instance","url-text","url-add-text","url-import"]) $(id).disabled=busy;

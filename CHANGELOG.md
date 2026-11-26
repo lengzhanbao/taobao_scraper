@@ -8,11 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- 修复启动对账（`recovery.py`）与 2.8.0 质量凭据字段不匹配导致的 `progress_receipt_evidence_mismatch` 误报，并消除对账时对同一视频的 3 次重复 SHA-256 哈希计算。
+- 修复历史/缺少 `attribution_status` 响应在 `product_events.py` 中可能跨房间串号的问题，以及 `itemExtData` 为字符串 JSON 时的解析容错。
+- 修复爬虫主循环中 `hot` 队列 FIFO 排序被 `random.choice` 抵消的问题，以及全部剩余房间均达到失败上限时无限 60 秒空转的问题。
+- 修复 `parse_data.py` 提取店铺归档目录名未经过房间归属过滤、`segment_product_evidence` 过滤后未重算摘要、`write_csv` 非原子写入以及多处未关闭文件句柄问题。
+- 修复控制台前端 `settingsV27Supported` 版本正则硬编码 `/^2\.(7|8)\./` 的隐患，改为语义版本比较。
+- 修复 `digital_flags.py` 中同时存在 `true` 与缺失/未知值时 `raw_label` 未标注为 `true|unknown` 的不对称问题。
 - 2.6.1：完整响应写入 staging 扫描 journal 与段 journal，内存预览保留 800000 字符上限并记录截断元数据；最终 JSON 仍内嵌完整 responses。
 - 统一监听与扫描共享状态锁，拒绝 liveId 不匹配的迟到直播详情；验证码改为有限时人工等待，控制台显示等待状态。
 - 控制台操作按钮增加处理中反馈；监听异常增加短退避。
 
 ### Changed
+- 提升 Windows 写盘与长跑稳定性：`safe_io` 增加 `os.replace` 瞬时占用重试与失败临时文件清理；`RetryState` 改为单一滚动 `.bak` 备份防止备份文件无限膨胀；`EvidenceCache` 改为线程安全 LRU 缓存并缓存归档摘要；`server.py` 减少单次 `/api/state` 轮询中的重复磁盘读取，放宽 `/api/urls` POST 上限至 128 KB；`recording.py` 节流录制状态落盘并跳过重复 journal JSON 校验，失败录制补充 best-effort 媒体探测。
+- 优化本地控制台前端视觉与交互动画：升级毛玻璃粘性顶栏、深色仪器风侧栏与日志终端、运行态呼吸脉冲指示灯、通道卡片流动状态条、进度条光泽过渡、微抬升卡片动效与彩色采集结果徽章（完整保留 `prefers-reduced-motion` 无障碍支持）。
 - 控制台升级到 2.6：记录已捕获标记是否全 true、缺失与检测空窗，不新增数字人样本分类或覆盖阈值。
 - 录制凭据保存 FFprobe 实测时长和 SHA256；归档逐段核验 JSON、视频、弹幕与汇总成套对应。真实空弹幕、未捕获和提取失败分别记录。
 - 历史 7 分钟补全改为递归只读核验和独立候选输出，不用墙钟时间补足时长，不改原录制时间戳或 staging。
