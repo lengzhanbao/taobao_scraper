@@ -35,6 +35,28 @@
 - 💼 竞品直播策略分析
 - 🎓 学术研究数据采集
 
+### 🖥️ 本地控制台界面预览（v2.8.1）
+
+![淘宝直播采集控制台 v2.8.1 首屏总览](docs/images/dashboard-overview.png)
+
+<details>
+<summary>点击展开更多界面截图（实例进度表 / 深色终端日志框）</summary>
+
+**实例与采集进度 · 最近采集尝试**
+![实例与采集进度](docs/images/dashboard-instances.png)
+
+**环境检查 · 运行时间线 · 深色日志终端**
+![运行日志与时间线](docs/images/dashboard-logs.png)
+
+</details>
+
+### ✨ 2.8.1 稳定性与体验更新
+
+- **调度与对账修复**：修复已录房间 `hot` 队列的 FIFO 排序被随机抽取抵消的问题；修复全部剩余房间均达失败上限时无限空转的问题；修复启动对账（`recovery.py`）与 2.8 质量凭据字段不兼容导致的误报，并消除对账时对同一视频的 3 次重复哈希计算。
+- **数据归属与解析加固**：修复无 `attribution_status` 的历史响应可能跨房间串号的问题；`itemExtData` 增加字符串 JSON 容错；归档目录命名与商品事件摘要按当前房间归属与过滤结果保持一致；`write_csv` 改为原子写入。
+- **Windows 长跑与面板性能**：`safe_io` 增加 Windows 瞬时文件占用重试与临时文件清理；`RetryState` 改为单一滚动 `.bak` 备份；`EvidenceCache` 升级为线程安全 LRU 并缓存归档摘要；减少 `/api/state` 单次轮询重复读盘，`/api/urls` POST 上限放宽至 128 KB。
+- **控制台视觉与动效升级**：毛玻璃粘性顶栏、深色仪器风侧栏与日志终端、运行态呼吸脉冲指示灯、通道流动状态条、进度条光泽过渡、微抬升卡片动效与采集结果彩色徽章（完整支持 `prefers-reduced-motion`），同时修复前端版本号语义判断。
+
 ---
 
 ### 研究数据升级 2.8.0：质量、商品事件与时间证据
@@ -54,7 +76,7 @@
 
 控制台新增“最近采集尝试”表：可直接看到每个直播间是已录制、按规则跳过、网络失败、验证码超时还是录制/核验失败，并显示失败原因、重试次数、录制段和目标达成状态。网址清单表新增“质量”列，按房间显示目标达成与缺失音轨计数；这些数字仍与技术有效段、完整归档段分开。
 
-### 控制台 2.8.0：快速启动与计数说明
+### 控制台 2.8.1：快速启动与计数说明
 
 **前置条件：** Python 3.9 或更高版本；安装 `requirements.txt` 中依赖（采集器需要 `DrissionPage`）；已安装 Edge、FFmpeg 和 FFprobe。控制台本身使用 Python 标准库提供本机网页服务，不依赖网页框架。首次打开后，在“录制设置”中配置数据目录及 Python、Edge、FFmpeg、FFprobe 路径，保存设置并通过“检查环境”后，再按需点击“启动采集”。
 
@@ -472,17 +494,19 @@ git push origin feature/your-feature-name
 
 ## 📖 Introduction (English)
 
-**Taobao Live Scraper** is a professional data collection tool for Taobao live streaming, focusing on monitoring, recording, and analyzing digital human live rooms.
+**Taobao Live Scraper (v2.8.1)** is a professional data collection tool for Taobao live streaming, focusing on monitoring, recording, and analyzing digital human live rooms.
 
 ### Key Features
 
-**Local collection panel (2.7.1):** The refreshed first screen prioritizes verified progress and five live instance states, with instance controls placed before URL and settings sections. Manage up to five Edge crawler instances, URL lists, recording settings, environment checks, and logs through a loopback-only web interface. Crawlers start only after an explicit click. See the [control panel guide](docs/control-panel.md).
+**Local collection panel (2.8.1):** Manage up to five Edge crawler instances, URL lists, recording settings, environment checks, recent collection attempts, timelines, and dark-terminal logs through a loopback-only web interface with smooth status animations and live channel indicators. Crawlers start only after an explicit click. See the [control panel guide](docs/control-panel.md) and [research data upgrade guide](docs/RESEARCH_DATA_UPGRADE.md).
 
-✅ **Multi-Instance Parallel Recording** - 5 independent browser instances monitoring different live rooms simultaneously  
-✅ **Smart Digital Human Detection** - Automatically identify digital human anchor live rooms  
-✅ **Complete Data Collection** - Video recording + Barrage capture + Product info + Live data  
-✅ **Automated Archiving** - Automatically parse and organize recorded data  
-✅ **Anti-Ban Design** - Random delays, cooling mechanism, humanized operation simulation  
+![Taobao Live Scraper v2.8.1 Dashboard Overview](docs/images/dashboard-overview.png)
+
+✅ **Multi-Instance Parallel Recording** - 5 independent browser instances with FIFO cooldown scheduling for resumed rooms  
+✅ **Smart Digital Human Detection** - Tri-state `isDigitalAnchorLive` tracking (`true` / `false` / `missing`) + title keyword rules  
+✅ **Research-Grade Evidence (2.8.x)** - Three-way recording quality split, strict/candidate product events & intervals, timing evidence, and collection attempt ledgers  
+✅ **Automated Verified Archiving** - Per-recording SHA-256 verification and atomic Windows-safe writes  
+✅ **Anti-Ban & Stability Design** - Random delays, failure cooldown budgets, retry-exhausted clean exit, and rolling backups  
 
 ### Use Cases
 
@@ -494,7 +518,7 @@ git push origin feature/your-feature-name
 
 ---
 
-### Control Panel 2.7.1: Quick Start and Metrics
+### Control Panel 2.8.1: Quick Start and Metrics
 
 **Prerequisites:** Python 3.9+, dependencies from `requirements.txt` (the crawler requires `DrissionPage`), Microsoft Edge, FFmpeg, and FFprobe. The panel web server uses Python's standard library and needs no web framework. On first launch, configure the data directory and Python, Edge, FFmpeg, and FFprobe paths in Recording Settings; save and pass Environment Check before explicitly starting collection.
 
@@ -511,7 +535,9 @@ Open `http://127.0.0.1:8765`. Linux/macOS can use the same Python command; confi
 |---|---|
 | Historical count | Count from URL lists or legacy progress; used as the resume position, not proof that old videos were revalidated. |
 | Technically valid segments | Segments with measured FFprobe duration and matching file evidence. If no evidence exists, the panel shows “unverified”; partial totals include only evidenced segments and are marked “at least.” |
-| Complete archive segments | Segments whose archive manifest verifies the JSON, video, comment CSV, summary row, and associated file evidence. Missing legacy evidence is not reconstructed. |
+| Complete archive segments | Segments whose archive manifest verifies the JSON, video, comment CSV, summary row, per-recording analysis files, and SHA-256 evidence. |
+| Target duration met | Verified segments reaching at least 90% of configured target duration, tracked separately from technical validity. |
+| Missing audio segments | Verified segments where FFprobe explicitly confirms no audio stream; unknown media facts are kept separate. |
 | Captured digital-human markers | Counts only captured platform markers linked to the current live ID: all true, not all true, and missing. This does not prove continuous observation or define an additional sample category. |
 
 Legacy data without current verification evidence retains its historical count and is shown as unverified; unknown segments are not counted as technically valid. The current fixes have not been validated in a long-duration end-to-end run against a real Taobao live stream. URL updates use a cooperative sidecar file lock; an external editor that ignores the lock can still race in a narrow write window.
